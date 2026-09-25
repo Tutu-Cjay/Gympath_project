@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.secret
+gympath.db
+gympath.db-wal
+gympath.db-shm
+.venv/

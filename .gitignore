@@ -1,0 +1,84 @@
+# ============================================================
+# Gympath — root .gitignore
+# Keeps source in git; build output, runtime data and oversized
+# assets out. (Repo is 3.3 GB on disk; ~15 MB of it is source.)
+# ============================================================
+
+# ---------- Flutter / Dart (mobile/) ----------
+# mobile/build alone is ~2.8 GB (single .so files up to 342 MB)
+mobile/build/
+mobile/.dart_tool/
+mobile/.packages
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.pub-cache/
+mobile/.pub/
+**/generated_plugin_registrant.dart
+*.iml
+*.apk
+*.aab
+*.aar
+
+# Android
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/app/debug/
+mobile/android/app/profile/
+mobile/android/app/release/
+mobile/android/key.properties
+*.jks
+*.keystore
+
+# iOS / macOS (when added)
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/Flutter.framework/
+mobile/ios/Flutter/Flutter.podspec
+mobile/ios/Flutter/Generated.xcconfig
+mobile/ios/Flutter/flutter_export_environment.sh
+
+# ---------- Python (backend/, tools/) ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Backend runtime data & secrets (never commit)
+backend/gympath.db
+backend/gympath.db-wal
+backend/gympath.db-shm
+backend/.secret
+
+# IMU debug/test logs produced by tools/ (~13 MB, regenerable)
+tools/logs/
+
+# ---------- Firmware build output ----------
+firmware/**/build/
+firmware_backup_*/**/build/
+*.elf
+*.map
+
+# ---------- Oversized / derived assets ----------
+# GitHub rejects any file over 100 MB. The pitch deck is 228 MB
+# (it embeds ~211 MB of video) — keep it in cloud storage, not git.
+docs/*.pptx
+# Poster frames extracted from the deck (derived, ~17 MB)
+docs/ppt_posters/
+
+# ---------- Website ----------
+# website/ is its own git repo with its own GitHub Pages remote
+# (Tutu-Cjay/Tutu-Cjay.github.io). Tracking it here would create a
+# nested-repo gitlink. Remove this line only if you drop that repo.
+website/
+
+# ---------- IDE / editor / OS ----------
+.idea/
+.vscode/
+.obsidian/
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
+desktop.ini
