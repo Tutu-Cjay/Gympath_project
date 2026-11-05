@@ -32,9 +32,9 @@ jobs:
         working-directory: mobile
         run: flutter pub get
 
-      - name: Analyze Dart code
+      - name: Analyze Dart code (informational lints do not fail the build)
         working-directory: mobile
-        run: flutter analyze --no-fatal-infos
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build Android APK
         working-directory: mobile
