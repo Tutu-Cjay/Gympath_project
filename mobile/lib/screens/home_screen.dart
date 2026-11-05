@@ -9,6 +9,7 @@ import 'firmware_update_screen.dart';
 import 'gym_monitoring_screen.dart';
 import 'leaderboard_screen.dart';
 import 'meal_plan_screen.dart';
+import 'anatomy_studio_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -78,6 +79,17 @@ class _HomeTab extends StatelessWidget {
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              IconButton(
+                                tooltip: 'Movement Studio',
+                                icon: const Icon(Icons.accessibility_new_rounded),
+                                color: AppTheme.neonGreen,
+                                onPressed: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const AnatomyStudioScreen(),
+                                  ),
+                                ),
+                              ),
                               IconButton(
                                 tooltip: 'Firmware update',
                                 icon: const Icon(Icons.system_update_rounded),
