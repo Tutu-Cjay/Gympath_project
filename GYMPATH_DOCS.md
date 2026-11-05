@@ -2,6 +2,19 @@
 
 > **Date:** 2026-04-05 | **Version:** 1.0 | **Status:** Active Development
 
+> **Update 2026-10-06.** Sections 3–4 below describe the older `firmware/IMU_path`
+> pipeline (Mahony AHRS, 3D) and the `WorkoutGameScreen`. The current product is
+> **cable-machine only** and runs **`firmware/Gympath_Track`**:
+> - 1D tracking along the gravity axis captured at START (+ up / − down), ZUPT, and a
+>   direction-agnostic rep counter. No Mahony filter.
+> - App: `CableTrackScreen` is the live graph for every workout.
+> - OTA firmware updates over BLE, and a USB test mode for emulator testing.
+> - A FastAPI + SQLite backend now exists (`backend/`), but the app does not use it yet.
+>
+> For the current state see [PROJECT_PLAN.md](PROJECT_PLAN.md) (phases 8.6–8.8) and
+> [docs/ble_protocol.md](docs/ble_protocol.md). Build steps for the current firmware
+> are in [README.md](README.md).
+
 ---
 
 ## Table of Contents
@@ -811,7 +824,7 @@ Planned Server Architecture:
 ### Firmware (Arduino IDE)
 
 **Required Libraries** (install via Arduino Library Manager):
-- `NimBLE-Arduino` >= 1.4.0
+- `NimBLE-Arduino` 2.3.7 (2.x callback signatures; `Gympath_Track` relies on them)
 - `QMI8658` (custom or from vendor)
 - `MahonyAHRS`
 - `TFT_eSPI` (configure for your display in User_Setup.h)

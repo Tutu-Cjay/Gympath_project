@@ -5,6 +5,7 @@ import '../widgets/bottom_nav_bar.dart';
 import '../widgets/ble_status_chip.dart';
 import '../services/workout_store.dart';
 import 'choose_workout_screen.dart';
+import 'firmware_update_screen.dart';
 import 'gym_monitoring_screen.dart';
 import 'leaderboard_screen.dart';
 import 'meal_plan_screen.dart';
@@ -74,7 +75,24 @@ class _HomeTab extends StatelessWidget {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          const BleStatusChip(),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Firmware update',
+                                icon: const Icon(Icons.system_update_rounded),
+                                color: AppTheme.textSecondary,
+                                onPressed: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        const FirmwareUpdateScreen(),
+                                  ),
+                                ),
+                              ),
+                              const BleStatusChip(),
+                            ],
+                          ),
                         ],
                       ),
                       SizedBox(height: Responsive.h(context, 20)),

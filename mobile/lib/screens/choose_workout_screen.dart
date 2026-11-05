@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
-import 'workout_game_screen.dart';
+import 'cable_track_screen.dart';
 
 class ChooseWorkoutScreen extends StatefulWidget {
   const ChooseWorkoutScreen({super.key});
@@ -11,13 +11,15 @@ class ChooseWorkoutScreen extends StatefulWidget {
 }
 
 class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
+  // Gympath is cable-machine only — every workout runs on the live
+  // gravity-axis tracking graph (CableTrackScreen).
   final List<Map<String, dynamic>> _workouts = [
-    {'name': 'Full Body', 'duration': '20 m', 'icon': Icons.fitness_center_rounded},
-    {'name': 'Barbell Bench Press', 'duration': '20 m', 'icon': Icons.sports_gymnastics_rounded},
-    {'name': 'Squats', 'duration': '15 mn', 'icon': Icons.directions_run_rounded},
-    {'name': 'Deadlift', 'duration': '20 mn', 'icon': Icons.fitness_center_rounded},
-    {'name': 'Pull-Up', 'duration': '12 mn', 'icon': Icons.self_improvement_rounded},
-    {'name': 'Running', 'duration': '20 mn', 'icon': Icons.directions_run_rounded},
+    {'name': 'Lat Pulldown', 'duration': '12 min', 'icon': Icons.fitness_center_rounded},
+    {'name': 'Seated Cable Row', 'duration': '12 min', 'icon': Icons.rowing_rounded},
+    {'name': 'Tricep Pushdown', 'duration': '10 min', 'icon': Icons.sports_gymnastics_rounded},
+    {'name': 'Cable Bicep Curl', 'duration': '10 min', 'icon': Icons.fitness_center_rounded},
+    {'name': 'Cable Chest Fly', 'duration': '12 min', 'icon': Icons.sports_gymnastics_rounded},
+    {'name': 'Face Pull', 'duration': '8 min', 'icon': Icons.self_improvement_rounded},
   ];
 
   String _searchQuery = '';
@@ -176,7 +178,7 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (context) => WorkoutGameScreen(
+                              builder: (context) => CableTrackScreen(
                                 workoutName: _workouts[_selectedIndex!]['name'],
                               ),
                             ),

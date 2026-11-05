@@ -24,6 +24,13 @@ Gympath is a wearable fitness tracking system with two components:
 
 **Current state (2026-06-10):** Firmware fully functional and tested. Mobile app UI complete with live BLE data. No backend server. 6 bugs identified — 2 critical, 4 high/medium.
 
+**Current state (2026-10-06):** Product scope narrowed to **cable machines only**. Device
+runs the new `firmware/Gympath_Track` (1D gravity-axis tracking + OTA + USB test mode,
+`FW_VERSION 1.0.0`), flashed over USB. Phone ↔ device verified end-to-end on the Android
+emulator through the USB test bridge (50 Hz, Start/Stop/Zero, reps counted). Open issue:
+**position drift** during longer hand-held sets — tuning is next. Backend (FastAPI +
+SQLite) built locally, not yet wired to the app or publicly hosted.
+
 ---
 
 ## 2. Methodology: AI-Driven Development Lifecycle (AI-DLC)
@@ -654,7 +661,7 @@ bulk/list-order/stats/leaderboard) all pass; live uvicorn boot + register + auth
 | BS3 | Leaderboard + stats API | ✅ Done (ranked by points) |
 | BS-M | **Mobile↔backend wiring** (login screens, API client, sync `WorkoutStore`) | ⬜ Next decision |
 | BS4 | Push notifications (coach alerts) | 🔵 Later (FCM) |
-| BS5 | OTA firmware hosting | 🔵 Later |
+| BS5 | OTA firmware hosting | 🟡 Static manifest on GitHub Pages (B11) |
 
 ### Phase 9 — Operations: Hardware v2 (🔵 PLANNED)
 
@@ -665,6 +672,89 @@ bulk/list-order/stats/leaderboard) all pass; live uvicorn boot + register + auth
 | Haptic feedback | ERM vibration motor | Rep milestone buzz |
 | Heart rate | MAX30102 | I²C, add to MotionPacket v2 |
 | Cable tension | HX711 + load cell | Resistance in kg |
+
+### Phase 8.6 — Bolt B10: 1D Gravity-Axis Tracking (🟡 running on device — drift tuning)
+
+**Completed (code):** 2026-10-04
+**Idea:** Gympath is cable-machine-only, so motion is effectively 1D (with / against
+gravity). Replaces 3D dead-reckoning (B8) with a single signed axis.
+
+- **Firmware** `firmware/Gympath_Track/` (new sketch; existing firmware untouched):
+  phone writes START → device (already placed) averages accel + gyro over a 600 ms
+  still window → gravity vector, |g|, gyro bias (retries until still; fails after 6 s).
+  Then `a_up = dot(a, up) − |g|` (+ up / − down) → v → p, up-axis carried through
+  rotation with the gyro (`du/dt = −ω×u`), ZUPT + axis/bias re-anchoring while still,
+  direction-agnostic rep counter (out ≥ 5 cm, back ≥ 60 %). Callback-free BLE
+  (polls control value, gates on `getConnectedCount()` — NimBLE 2.x safe).
+  TFT on core 0 (READY / HOLD / rep count). Compiled with arduino-cli,
+  `esp32:esp32:esp32s3`: 528 KB (40 % flash), 0 errors.
+- **BLE:** new `…cdef8` control `[cmd, seq]` (STOP/START/ZERO) and `…cdef9` 20-byte
+  track packet @ 50 Hz; legacy `…cdef1/2/3` still populated (see `docs/ble_protocol.md`).
+- **Mobile:** `TrackSample` model, `BleService.trackStream` / `sendCommand` /
+  `trackSupported`, new `CableTrackScreen` — **the graph for every workout**
+  (Choose Workout → Start opens it with the workout's name): Start/Stop/Zero, status,
+  reps/position/velocity, scrolling **position (cm) vs time (s)** tracking path with
+  ±up/down axis; Stop saves the session under the workout name and shows a
+  reps / range-of-motion / time summary. Workout list is now cable-only (Lat Pulldown,
+  Seated Cable Row, Tricep Pushdown, Cable Bicep Curl, Cable Chest Fly, Face Pull).
+  The old `WorkoutGameScreen` (curved track + reference wave) is no longer routed to. `dart analyze`: 0 issues in
+  new files; debug APK builds; UI verified on the Android emulator (no BLE there).
+- **First device test (2026-10-06, hand-held, via USB test mode — see 8.8):** calibration
+  → *Tracking · still* at 0.0 cm; the first reps tracked cleanly around 0 cm (+8 cm
+  peaks) and 7 reps were counted, but over a longer set the position **drifted to
+  ≈ −100 cm in ~6 s**. Likely causes: device rotating in the hand (up-axis error),
+  too little stillness between reps for ZUPT to fire, and the USB cable dropping at the
+  end of the run.
+- **Next:** log raw a / v / p / zupt to CSV during a test, mount the device on a real
+  cable stack, then tune `ZUPT_*`, `VEL_LEAK`, `REP_MIN_DISP`.
+
+### Phase 8.7 — Bolt B11: Firmware Update over BLE (🟡 built — OTA not yet tested on device)
+
+**Completed (code):** 2026-10-05 · backup: `firmware_backup_2026-10-05/`
+**Decision:** update through the phone over BLE rather than device Wi-Fi — the phone
+is always connected, and gym Wi-Fi is often behind a captive portal.
+
+- **Firmware** (`Gympath_Track`, `FW_VERSION "1.0.0"`): `…cdefa` OTA characteristic
+  (BEGIN/DATA/END/ABORT, status notify) using ESP32 `Update` into the second OTA slot
+  with MD5 + image verification, reboot on success, abort on link loss; `…cdefb`
+  version string; MTU 517; tracking paused and a progress screen on the TFT during
+  updates. The write callback uses the NimBLE 2.x signature with `override`, so a
+  stale signature is now a compile error. Compiled: 534 KB (40 %).
+- **Hosting:** `website/firmware/manifest.json` + `gympath_track-<ver>.bin` on GitHub
+  Pages; `tools/release_firmware.ps1` builds, copies, hashes and writes the manifest.
+- **Mobile:** `FirmwareUpdateService` (manifest check, download + size/MD5 verify,
+  chunked write-with-response, high connection priority, abort on error),
+  `FirmwareUpdateScreen` (Home → update icon) with progress and back-navigation locked
+  mid-update. Unit tests for version compare + manifest parsing pass.
+- **Bootstrap:** the tracker must get Gympath_Track over USB **once**; every later
+  version installs from the app. ✅ Done 2026-10-06 (COM4, CH343, hash verified).
+- **Still open:** a real OTA run from a phone with Bluetooth, and pushing
+  `website/firmware/` (manifest + 1.0.0 bin) to GitHub Pages.
+
+### Phase 8.8 — Bolt B12: USB Test Mode (✅ verified on emulator + device)
+
+**Completed:** 2026-10-06 · backup: `firmware_backup_2026-10-06/`
+**Why:** the Android emulator has no Bluetooth, so the app could not be tested against
+the real tracker without a phone.
+
+```
+Tracker ──UART 921600──▶ tools/serial_bridge.py ──TCP 127.0.0.1:7700──▶ emulator app (10.0.2.2:7700)
+        ◀────────────────── Start / Stop / Zero ─────────────────────────────┘
+```
+
+- **Firmware:** serial always at 921600. `TEST 1` / `TEST 0` switch test mode; in test
+  mode the same TrackPacket / MotionPacket as BLE are sent as hex lines (`T,` / `M,`)
+  at 50 Hz, `V,<version>` on entry, commands arrive as `C,<cmd>,<seq>` (shared
+  `applyCommand()` with the BLE control path). TFT shows **USB TEST**. BLE keeps
+  working. Compiled 562 KB (42 %).
+- **Bridge** `tools/serial_bridge.py`: auto-detects the COM port, relays lines both ways,
+  prints 5 s stats, reopens the port after a USB drop and restores test mode; `--sim`
+  generates synthetic 30 cm reps when no tracker is attached.
+- **Mobile (debug builds):** long-press the status chip → *USB test link*
+  (`BleService.connectTestLink`); chip turns yellow **USB test · N**. Track, motion,
+  commands and firmware version all go over the socket.
+- **Verified:** `--sim` → graph + 3 reps on the emulator; real tracker → 250 packets /
+  5 s (exactly 50 Hz), all commands delivered, reps counted.
 
 ### Phase 9.5 — Landing Website (✅ LIVE)
 
@@ -694,32 +784,33 @@ brand, Mongolian copy. Deployed to the org Pages repo `Tutu-Cjay/Tutu-Cjay.githu
 
 ## 5. System Architecture (Current State)
 
+Updated 2026-10-06 (firmware `Gympath_Track`, cable-machine scope).
+
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        GYMPATH v1.0                            │
-│                                                                │
-│  ┌─────────────────────────┐          ┌────────────────────┐  │
-│  │  ESP32-S3 Smart Tracker │          │  Flutter Mobile App│  │
-│  │                         │          │                    │  │
-│  │  QMI8658 (1000 Hz)      │          │  BleService        │  │
-│  │    ↓                    │  BLE 5.0 │    ↓               │  │
-│  │  Mahony AHRS (500 Hz)   │◄────────►│  MotionData stream │  │
-│  │    ↓                    │  60B/20ms│    ↓               │  │
-│  │  rotateToEarth()        │          │  WorkoutGameScreen │  │
-│  │    ↓                    │          │  MotionLogScreen   │  │
-│  │  LPF + integrate        │          │  HomeScreen (4tab) │  │
-│  │    ↓                    │          │  GymMonitoring     │  │
-│  │  accEnv + rep count     │          │  Leaderboard       │  │
-│  │    ↓                    │          │  MealPlan          │  │
-│  │  TFT 7-seg display      │          │                    │  │
-│  └─────────────────────────┘          └────────────────────┘  │
-│                                                ↕ (planned)     │
-│                                       ┌────────────────────┐  │
-│                                       │  Backend Server    │  │
-│                                       │  FastAPI + Postgres│  │
-│                                       │  Redis + S3        │  │
-│                                       └────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                            GYMPATH                                   │
+│                                                                      │
+│  ┌───────────────────────────┐            ┌───────────────────────┐ │
+│  │ ESP32-S3 Tracker          │            │ Flutter Mobile App    │ │
+│  │ firmware/Gympath_Track    │            │                       │ │
+│  │                           │  BLE 5.0   │ BleService            │ │
+│  │ QMI8658 (1000 Hz)         │◄──────────►│  trackStream (20 B)   │ │
+│  │   ↓ START: still window   │ 20 B/20 ms │  sendCommand          │ │
+│  │ gravity axis, |g|, bias   │ + OTA      │   ↓                   │ │
+│  │   ↓                       │            │ CableTrackScreen      │ │
+│  │ a_up → v → p (1D, ±)      │  USB test  │  (graph = every       │ │
+│  │ ZUPT, axis re-anchor      │◄─ bridge ─►│   workout)            │ │
+│  │ rep counter (≥5 cm, 60 %) │ TCP 7700   │ FirmwareUpdateScreen  │ │
+│  │ OTA → 2nd app slot (MD5)  │            │ Home / Leaderboard …  │ │
+│  │ TFT: READY/HOLD/reps      │            │ WorkoutStore (local)  │ │
+│  └───────────────────────────┘            └──────────┬────────────┘ │
+│                                                      ↕ (not wired)  │
+│  ┌───────────────────────────┐            ┌───────────────────────┐ │
+│  │ GitHub Pages              │            │ Backend (local PC)    │ │
+│  │ tutu-cjay.github.io       │            │ FastAPI + SQLite      │ │
+│  │ site + firmware/manifest  │            │ JWT, sessions, board  │ │
+│  └───────────────────────────┘            └───────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -735,6 +826,14 @@ brand, Mongolian copy. Deployed to the org Pages repo `Tutu-Cjay/Tutu-Cjay.githu
 | `…cdef3` | Mean Velocity | READ, NOTIFY | float32 LE | ✅ Implemented |
 | `…cdef4` | Position Reset | WRITE | uint8 | ⬜ Planned B7b |
 | `…cdef5` | Battery Level | READ | uint8 % | ⬜ Planned Phase 9 |
+| `…cdef8` | Track Control | WRITE | `[cmd, seq]` STOP/START/ZERO | ✅ B10 |
+| `…cdef9` | Track Data | READ, NOTIFY | 20 B packed @ 50 Hz | ✅ B10 |
+| `…cdefa` | Firmware Update (OTA) | WRITE, NOTIFY | BEGIN/DATA/END/ABORT + status | ✅ B11 |
+| `…cdefb` | Firmware Version | READ | UTF-8, e.g. `1.0.0` | ✅ B11 |
+
+Gympath_Track sends a 60 B `…cdef1` packet (v1 layout; `az`/`velZ`/`posZ` carry the 1D
+values). The same packets travel over USB in test mode (B12). Full spec:
+`docs/ble_protocol.md`.
 
 ### Connection parameters:
 - Advertising: `"Smart Tracker"`, service UUID in adv data
@@ -748,36 +847,45 @@ brand, Mongolian copy. Deployed to the org Pages repo `Tutu-Cjay/Tutu-Cjay.githu
 Gympath_project/
 ├── PROJECT_PLAN.md              ← THIS FILE — AI-DLC history + roadmap
 ├── GYMPATH_DOCS.md              ← Full technical documentation + SVG pipelines
-├── README.md                    ← ⚠️ OUTDATED (says React Native, MPU6050)
-├── firmware/IMU_path/
-│   ├── IMU_path.ino             ← ESP32 main (499 lines) ✅
-│   ├── logo200.h                ← Boot logo RGB565 array ✅
-│   └── logo generator.py        ← PNG → header conversion ✅
+├── README.md                    ← quick start (updated 2026-10-06)
+├── firmware/
+│   ├── Gympath_Track/
+│   │   └── Gympath_Track.ino    ← CURRENT firmware: 1D tracking + OTA + USB test ✅
+│   └── IMU_path/                ← B8 3D experiments (parked) + boot logo assets
 ├── mobile/
-│   ├── pubspec.yaml             ← flutter_blue_plus + permission_handler ✅
+│   ├── pubspec.yaml             ← flutter_blue_plus, permission_handler, http, crypto
 │   ├── lib/
-│   │   ├── main.dart            ← routes, theme scale ✅
-│   │   ├── theme/app_theme.dart ← design tokens ✅
-│   │   ├── models/motion_data.dart  ← 60B parser ✅
-│   │   ├── services/ble_service.dart ← BLE singleton ⚠️ bugs H1,H2,H4
+│   │   ├── main.dart            ← routes, theme scale
+│   │   ├── theme/app_theme.dart ← design tokens
+│   │   ├── models/
+│   │   │   ├── motion_data.dart     ← 60/104 B parser
+│   │   │   ├── track_sample.dart    ← 20 B track packet parser (B10)
+│   │   │   ├── workout_session.dart
+│   │   │   └── movement_wave.dart
+│   │   ├── services/
+│   │   │   ├── ble_service.dart     ← BLE singleton + USB test link (B12)
+│   │   │   ├── firmware_update_service.dart ← manifest, download, OTA flash (B11)
+│   │   │   ├── workout_store.dart / wave_store.dart
 │   │   ├── screens/
-│   │   │   ├── splash_screen.dart ✅
-│   │   │   ├── connect_device_screen.dart ⚠️ bug H3
-│   │   │   ├── home_screen.dart ⚠️ hardcoded data M6
-│   │   │   ├── choose_workout_screen.dart ✅
-│   │   │   ├── workout_game_screen.dart ⚠️ bug M3
-│   │   │   ├── motion_log_screen.dart ✅
-│   │   │   ├── gym_monitoring_screen.dart ✅
-│   │   │   ├── leaderboard_screen.dart ✅
-│   │   │   ├── meal_plan_screen.dart ✅
-│   │   │   └── active_workout_screen.dart ✅
-│   │   ├── widgets/bottom_nav_bar.dart ✅
-│   │   └── utils/responsive.dart ✅
+│   │   │   ├── cable_track_screen.dart      ← live tracking graph, every workout (B10)
+│   │   │   ├── firmware_update_screen.dart  ← OTA UI (B11)
+│   │   │   ├── choose_workout_screen.dart   ← cable-only exercise list
+│   │   │   ├── home_screen.dart, splash, connect_device, motion_log,
+│   │   │   ├── gym_monitoring, leaderboard, meal_plan
+│   │   │   └── workout_game_screen.dart     ← no longer routed (pending decision)
+│   │   ├── widgets/ble_status_chip.dart     ← link state; long-press = USB test (debug)
+│   │   └── utils/responsive.dart
+│   ├── test/firmware_update_test.dart       ← version compare + manifest tests
 │   └── DEPLOY.md
+├── backend/                     ← FastAPI + SQLite server (Phase 9)
 ├── tools/
-│   ├── imu_debug_viewer.py      ← serial debug viewer/logger (B8-D2) ✅
-│   └── logs/                    ← CSV logs written by the viewer
+│   ├── serial_bridge.py         ← USB test bridge tracker ↔ emulator (B12)
+│   ├── release_firmware.ps1     ← build + publish OTA image/manifest (B11)
+│   ├── imu_debug_viewer.py      ← serial debug viewer/logger (B8-D2)
+│   └── imu_rotation_test.py
 ├── firmware_backup_2026-06-10/  ← pre-B8 firmware backup
+├── firmware_backup_2026-10-05/  ← Gympath_Track before OTA
+├── firmware_backup_2026-10-06/  ← Gympath_Track before USB test mode
 └── docs/
     ├── requirements.md ✅
     ├── user_stories.md ✅
@@ -806,7 +914,11 @@ Gympath_project/
 | Firmware unit | Mock IMU data, verify rep count logic | ⬜ Not done |
 | Firmware BLE | nRF Connect app manual test | ✅ Done |
 | Flutter BLE parse | Unit test `MotionData.fromBytes()` with known bytes | ⬜ Not done |
+| Flutter OTA logic | `test/firmware_update_test.dart` (version compare, manifest) | ✅ 5/5 pass |
 | Flutter UI | Widget tests for screen rendering | ⬜ Not done |
+| Emulator E2E | Real tracker → `serial_bridge.py` → emulator app (B12) | ✅ 50 Hz, commands, reps |
+| Tracking accuracy | Mounted on a cable stack, compare with measured travel | ⬜ Next (drift seen hand-held) |
+| OTA on hardware | Phone with BLE installs a new version | ⬜ Not done |
 | E2E physical | Real device + phone, US1–US5 acceptance | ⬜ In B7 |
 
 ---

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
@@ -13,9 +14,12 @@ class BleStatusChip extends StatelessWidget {
     return ValueListenableBuilder<BleConnectionState>(
       valueListenable: BleService.instance.connectionState,
       builder: (context, state, _) {
-        final (color, label, icon) = _style(state);
         final busy = state == BleConnectionState.scanning ||
             state == BleConnectionState.connecting;
+        final usb = BleService.instance.testLink.value;
+        final (color, label, icon) = usb && state == BleConnectionState.connected
+            ? (const Color(0xFFFFC94D), 'USB test', Icons.usb_rounded)
+            : _style(state);
         return InkWell(
           borderRadius: BorderRadius.circular(999),
           onTap: busy
@@ -25,6 +29,8 @@ class BleStatusChip extends StatelessWidget {
                     BleService.instance.connect();
                   }
                 },
+          // debug builds: long-press → USB test link via tools/serial_bridge.py
+          onLongPress: kDebugMode && !busy ? () => _testLinkDialog(context) : null,
           child: Container(
             padding: EdgeInsets.symmetric(
               horizontal: Responsive.w(context, 12),
@@ -71,6 +77,41 @@ class BleStatusChip extends StatelessWidget {
         );
       },
     );
+  }
+
+  Future<void> _testLinkDialog(BuildContext context) async {
+    final ble = BleService.instance;
+    if (ble.testLink.value) {
+      await ble.disconnect();
+      return;
+    }
+    final ctrl = TextEditingController(text: '10.0.2.2:7700');
+    final addr = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('USB test link'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(
+            labelText: 'serial_bridge.py host:port',
+            helperText: 'Emulator → 10.0.2.2 is this PC',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('Connect')),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (addr == null || addr.isEmpty) return;
+    final i = addr.lastIndexOf(':');
+    final host = i > 0 ? addr.substring(0, i) : addr;
+    final port = i > 0 ? int.tryParse(addr.substring(i + 1)) ?? 7700 : 7700;
+    await ble.connectTestLink(host: host, port: port);
   }
 
   (Color, String, IconData) _style(BleConnectionState state) {

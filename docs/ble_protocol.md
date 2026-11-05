@@ -4,7 +4,12 @@
 
 The Smart Tracker device exposes a custom GATT service for motion data, configuration, and device info. The mobile app acts as BLE Central; the device acts as BLE Peripheral.
 
-> **Implementation status (2026-06-13).** The current firmware implements only
+> **Current firmware (2026-10-06): `firmware/Gympath_Track`** implements `…cdef1`–`…cdef3`
+> plus `…cdef8` (track control), `…cdef9` (20-byte track data), `…cdefa` (OTA) and
+> `…cdefb` (version) — sections 8–11 below — and the USB test mode at the end.
+> `…cdef4`–`…cdef7` are still planned.
+>
+> **Earlier status (2026-06-13, IMU_path firmware).** The current firmware implements only
 > three characteristics — `…cdef1` (motion, **60-byte** packed `MotionPacket`;
 > the v2/B8 build extends it to 104 bytes), `…cdef2` (rep count, **int32 LE**),
 > and `…cdef3` (mean velocity, float32 LE). Advertised local name is
@@ -85,6 +90,62 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 | Properties | Notify, Write |
 | Data Format | 1 byte: 0 = no op, 1 = reset rep count / new set |
 | Description | App writes 1 to signal set complete; device notifies on set completion |
+
+#### 8. Track Control (Write) — `firmware/Gympath_Track`
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdef8` |
+| Properties | Read, Write, Write Without Response |
+| Data Format | 2 bytes: `[cmd, seq]` — cmd `0` = STOP, `1` = START, `2` = ZERO; `seq` changes on every write so a repeated command is still acted on exactly once |
+| Description | START: device (already placed) averages accel+gyro while still → gravity vector, \|g\|, gyro bias; then tracks. ZERO: resets position to 0 without re-calibrating |
+
+#### 9. Track Data (Notify) — `firmware/Gympath_Track`
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdef9` |
+| Properties | Read, Notify |
+| Update Rate | 50 Hz while connected |
+| Data Format | 20-byte packed: `uint32 t_ms`, `float a` (m/s²), `float v` (m/s), `float p` (m), `int16 reps`, `uint8 state` (0 idle, 1 calibrating, 2 tracking, 3 calibration failed), `uint8 flags` (bit0 = still/ZUPT) |
+| Description | 1D motion along the gravity axis captured at START. **+ = against gravity (up), − = with gravity (down)**; `p` is relative to the START position |
+
+#### 10. Firmware Update / OTA (Write, Notify) — `firmware/Gympath_Track`
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdefa` |
+| Properties | Write, Write Without Response, Notify |
+| App → device | `BEGIN [1, size u32, md5 16 B]` · `DATA [2, bytes…]` (≤ MTU−4 per write, **with response** = flow control) · `END [3]` · `ABORT [4]` |
+| Device → app (notify) | `[state, err, written u32]` — state `0` idle, `1` receiving, `2` done (reboots ~1.5 s later), `3` error; err `1` bad header, `2` no space, `3` flash write, `4` verify/MD5 |
+| Description | Writes into the inactive OTA partition; the old firmware keeps running until the new image passes the MD5 + image check. A dropped link mid-update aborts and discards the partial image |
+
+#### 11. Firmware Version (Read) — `firmware/Gympath_Track`
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdefb` |
+| Data Format | UTF-8 string, e.g. `1.0.0` (`FW_VERSION`) — compared with `https://tutu-cjay.github.io/firmware/manifest.json` |
+
+> Gympath_Track also keeps …cdef1 (60 B; `az`/`velZ`/`posZ` carry the 1D values,
+> `motionCount` = reps), …cdef2 and …cdef3, so older app screens keep working.
+
+## USB Test Mode (no Bluetooth — emulator testing)
+
+`tools/serial_bridge.py` relays the tracker's UART (921600 baud) to TCP
+`127.0.0.1:7700`; the Android emulator reaches it at `10.0.2.2:7700`. In a
+debug build, long-press the status chip → *USB test link*.
+
+| Direction | Line | Meaning |
+|-----------|------|---------|
+| PC → device | `TEST 1` / `TEST 0` | enter / leave test mode (bridge sends these on app connect / disconnect) |
+| app → device | `C,<cmd>,<seq>` | same as a write to …cdef8 |
+| device → app | `V,<version>` | sent on entering test mode |
+| device → app | `T,<hex>` | 20-byte TrackPacket (§9), 50 Hz |
+| device → app | `M,<hex>` | 60-byte MotionPacket (§1), 50 Hz |
+
+The display shows **USB TEST** while active. `serial_bridge.py --sim`
+replaces the tracker with synthetic ~30 cm reps (no hardware needed).
 
 ## Advertising
 
