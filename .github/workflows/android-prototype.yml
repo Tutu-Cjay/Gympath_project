@@ -7,7 +7,7 @@ on:
       - feature/3d-anatomy-prototype
 
 permissions:
-  contents: read
+  contents: write   # publishes the APK as a prerelease
 
 concurrency:
   group: android-prototype-${{ github.ref }}
@@ -59,3 +59,18 @@ jobs:
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      # One fixed download link for the phone:
+      # https://github.com/<owner>/<repo>/releases/download/prototype-latest/gympath-prototype.apk
+      - name: Publish APK as prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: prototype-latest
+        run: |
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk gympath-prototype.apk
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" gympath-prototype.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Gympath prototype (build #${{ github.run_number }})" \
+            --notes "Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA::7}. Signed with a temporary debug key: uninstall the previous build before installing this one."
