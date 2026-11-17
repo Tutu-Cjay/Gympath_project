@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,7 +29,11 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pinned: "stable" moves every few weeks and each release raises the
+          # minimum Gradle / AGP it accepts, which broke this build twice.
+          # Bump this together with mobile/android (wrapper + settings.gradle).
           channel: stable
+          flutter-version: 3.41.x
           cache: true
 
       - name: Install dependencies
@@ -35,6 +43,10 @@ jobs:
       - name: Analyze Dart code (informational lints do not fail the build)
         working-directory: mobile
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Run unit tests
+        working-directory: mobile
+        run: flutter test
 
       - name: Build Android APK
         working-directory: mobile
