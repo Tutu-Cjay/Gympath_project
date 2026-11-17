@@ -9,10 +9,11 @@ import '../theme/app_theme.dart';
 
 /// Movement Studio: 3D muscle guide for the cable-machine workouts.
 ///
-/// Shows a rigged anatomy model (real muscle shapes from BodyParts3D, see
-/// tools/build_anatomy_model.py) performing the selected exercise. The
-/// muscles that exercise trains are tinted on the model itself: green for
-/// prime movers, amber for assisting muscles, brighter as they contract.
+/// Shows a rigged human figure (skin over real muscle shapes from BodyParts3D,
+/// see tools/build_anatomy_model.py) performing the selected exercise. The
+/// muscles that exercise trains show through the skin in their own shape:
+/// green for prime movers, amber for assisting muscles, brighter as they
+/// contract. The skin can be switched off to see the full muscle anatomy.
 class AnatomyStudioScreen extends StatefulWidget {
   /// Workout to open on (a name from the workout list). Defaults to the first.
   final String? initialExercise;
@@ -35,6 +36,7 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
   double _speed = 1.0;
   double _t = 0;
   String? _focus;
+  bool _skin = true;
 
   @override
   void initState() {
@@ -58,7 +60,7 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
       touchAction: TouchAction.none,
       disableTap: true,
       ar: false,
-      exposure: 1.15,
+      exposure: 1.0,
       shadowIntensity: 0.7,
       shadowSoftness: 0.9,
       debugLogging: false,
@@ -82,7 +84,12 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
   static String _script(CableExercise initial) => '''
 (function () {
   const mv = document.querySelector('#gp');
-  const BASE = [0.36, 0.20, 0.19];
+  // Resting muscles: grey under the skin, anatomical red with the skin off.
+  const UNDER_SKIN = [0.42, 0.43, 0.46];
+  const BARE = [0.42, 0.22, 0.20];
+  const SKIN = [0.30, 0.31, 0.35];
+  const SKIN_ALPHA = 0.45;
+  let BASE = UNDER_SKIN, skinAlpha = SKIN_ALPHA, skinDirty = true;
   const PRIMARY = [0.0, 1.0, 0.53];
   const SECONDARY = [1.0, 0.72, 0.20];
   let cfg = ${jsonEncode(_config(initial))};
@@ -105,7 +112,14 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
     const c = contraction(repTime());
     for (const m of mv.model.materials) {
       const n = m.name;
-      if (n === 'bone') continue;
+      if (n === 'skin') {
+        if (skinDirty) {
+          skinDirty = false;
+          m.pbrMetallicRoughness.setBaseColorFactor([SKIN[0], SKIN[1], SKIN[2], skinAlpha]);
+        }
+        continue;
+      }
+      if (n === 'shorts') continue;
       let k = 0, tone = PRIMARY;
       if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
       else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
@@ -117,7 +131,10 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
         BASE[0] + (tone[0] - BASE[0]) * k,
         BASE[1] + (tone[1] - BASE[1]) * k,
         BASE[2] + (tone[2] - BASE[2]) * k, 1]);
-      m.setEmissiveFactor([tone[0] * k * 0.16, tone[1] * k * 0.16, tone[2] * k * 0.16]);
+      // Glow strongly enough to read through the skin layer.
+      const glow = skinAlpha > 0 ? k : k * 0.3;
+      m.setEmissiveFactor([tone[0] * glow, tone[1] * glow, tone[2] * glow]);
+      if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
     }
   }
   function tick(now) {
@@ -130,6 +147,7 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
   }
   mv.addEventListener('load', function () {
     last = {};
+    skinDirty = true;
     mv.animationName = cfg.animation;
     if (!paused) mv.play();
   });
@@ -146,7 +164,13 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
     speed: function (s) { mv.timeScale = s; },
     seek: function (f) { mv.currentTime = f * (mv.duration || 4); },
     orbit: function (o) { mv.cameraOrbit = o; },
-    focus: function (g) { focus = g; last = {}; }
+    focus: function (g) { focus = g; last = {}; },
+    skin: function (on) {
+      skinAlpha = on ? SKIN_ALPHA : 0.0;
+      BASE = on ? UNDER_SKIN : BARE;
+      skinDirty = true;
+      last = {};
+    }
   };
   requestAnimationFrame(tick);
 })();
@@ -191,6 +215,11 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
   void _setSpeed(double v) {
     setState(() => _speed = v);
     _js('speed($v)');
+  }
+
+  void _toggleSkin() {
+    setState(() => _skin = !_skin);
+    _js('skin($_skin)');
   }
 
   void _setFocus(String group) {
@@ -312,6 +341,31 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
               _viewChip('BACK', '180deg 80deg 118%'),
               _viewChip('BEST', _exercise.cameraOrbit),
             ]),
+          ),
+          Positioned(
+            right: 12,
+            top: 12,
+            child: GestureDetector(
+              onTap: _toggleSkin,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: _skin
+                      ? AppTheme.neonGreen.withValues(alpha: .18)
+                      : Colors.black.withValues(alpha: .55),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: _skin ? AppTheme.neonGreen : Colors.white12),
+                ),
+                child: Text(_skin ? 'SKIN ON' : 'SKIN OFF',
+                    style: TextStyle(
+                        color: _skin ? AppTheme.neonGreen : Colors.white70,
+                        fontSize: 9,
+                        letterSpacing: 1,
+                        fontWeight: FontWeight.w700)),
+              ),
+            ),
           ),
           Positioned(
             left: 12,

@@ -1,11 +1,13 @@
 """Build the Movement Studio anatomy model (mobile/assets/models/anatomy_cable.glb).
 
-Takes the real muscle and bone shapes of BodyParts3D (one mesh per muscle),
+Takes the real muscle shapes of BodyParts3D (one mesh per muscle) and its skin,
 rigs them to a simple skeleton and bakes one animation per cable exercise.
 Each muscle group becomes its own material, so the app highlights a muscle by
 tinting that muscle's actual geometry -- nothing is painted onto a surface.
+The skin is a see-through layer on top, so the figure reads as a person while
+the working muscles show through in their real shape.
 
-    pip install bpy numpy
+    pip install bpy numpy scipy
     git clone --depth 1 https://github.com/Kevin-Mattheus-Moerman/BodyParts3D
     python tools/build_anatomy_model.py BodyParts3D/assets/BodyParts3D_data \
         mobile/assets/models/anatomy_cable.glb [preview_dir]
@@ -21,7 +23,9 @@ import re
 import sys
 
 import bpy
+import bmesh
 import numpy as np
+from scipy.spatial import cKDTree
 from mathutils import Matrix, Vector
 
 DATA = sys.argv[1]
@@ -34,10 +38,13 @@ REP_SECONDS = 4.0
 # Rep timeline (fractions of one rep): rest, pull, hold, return, rest.
 T_PULL, T_HOLD, T_RETURN, T_REST = 0.10, 0.45, 0.55, 0.92
 
-TARGET_TRIANGLES = 200_000   # whole-model budget after edge-collapse decimation
+TARGET_TRIANGLES = 200_000   # muscles + bones budget after edge-collapse decimation
+SKIN_TRIANGLES = 46_000
+SKIN_ID = "FMA7163"
 
-MUSCLE_COLOR = (0.36, 0.20, 0.19, 1.0)
-BONE_COLOR = (0.80, 0.77, 0.68, 1.0)
+MUSCLE_COLOR = (0.42, 0.43, 0.46, 1.0)   # resting muscles blend into the skin
+SKIN_COLOR = (0.30, 0.31, 0.35, 0.45)    # alpha: how much muscle shows through
+SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 
 # Muscle groups the app can highlight: material name -> name pattern.
 GROUPS = [
@@ -218,6 +225,8 @@ def load_parts():
     budget = np.maximum(24, TARGET_TRIANGLES * share / share.sum())
     for p, tris in zip(parts, budget):
         p["verts"], p["faces"] = decimate(p["verts"], p["faces"], int(tris))
+    verts, faces = decimate(*weld(read_stl(SKIN_ID)), SKIN_TRIANGLES)
+    parts.append(dict(id=SKIN_ID, name="skin", kind="skin", verts=verts, faces=faces))
     if CACHE:
         np.savez_compressed(CACHE, parts=np.array(parts, dtype=object))
     return parts
@@ -237,7 +246,13 @@ ground = min(p["verts"][:, 2].min() for p in parts)
 for p in parts:
     p["verts"][:, 2] -= ground
 by_name = {p["name"]: p for p in parts}
-print(len(parts), "parts,", sum(len(p["faces"]) for p in parts), "triangles")
+skin = by_name["skin"]
+# Bones only place the joints and guide the skin weights; they are not drawn
+# (the skin covers what the muscles leave open).
+under_parts = [p for p in parts if p["kind"] != "skin"]
+parts = [p for p in parts if p["kind"] == "muscle"]
+print(len(parts), "muscles,", sum(len(p["faces"]) for p in parts), "triangles +",
+      len(skin["faces"]), "skin")
 
 
 # ------------------------------------------------------------- skeleton ----
@@ -273,7 +288,7 @@ for s, word in (("l", "left"), ("r", "right")):
 
 hand_bones = {"l": [], "r": []}
 foot_bones = {"l": [], "r": []}
-for p in parts:
+for p in under_parts:
     if p["kind"] != "bone":
         continue
     c = p["verts"].mean(axis=0)
@@ -399,8 +414,6 @@ def skin_weights(part):
 
 
 def group_of(part):
-    if part["kind"] == "bone":
-        return "bone"
     for group, pattern in GROUPS:
         if re.search(pattern, part["name"]):
             return group
@@ -411,7 +424,7 @@ def group_of(part):
 scene = bpy.context.scene
 scene.render.fps = FPS
 
-material_names = [g for g, _ in GROUPS] + ["other_muscle", "bone"]
+material_names = [g for g, _ in GROUPS] + ["other_muscle", "skin", "shorts"]
 all_verts, all_faces, all_mats, all_w = [], [], [], []
 offset = 0
 for p in parts:
@@ -420,6 +433,62 @@ for p in parts:
     all_mats.append(np.full(len(p["faces"]), material_names.index(group_of(p))))
     all_w.append(skin_weights(p))
     offset += len(p["verts"])
+
+# The skin follows whatever lies right under it: each skin vertex takes the
+# blended weights of the nearest muscle / bone vertices. That keeps the arm's
+# skin with the arm even where it hangs close to the ribs.
+def slice_at(verts, faces, heights):
+    """Cut the surface along horizontal planes so a region can end on a clean line."""
+    me = bpy.data.meshes.new("tmp")
+    me.from_pydata(verts.tolist(), [], faces.tolist())
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    for z in heights:
+        bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:], dist=1e-6,
+                               plane_co=(0, 0, z), plane_no=(0, 0, 1))
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    bm.verts.ensure_lookup_table()
+    v = np.array([vert.co[:] for vert in bm.verts])
+    f = np.array([[vert.index for vert in face.verts] for face in bm.faces], dtype=np.int32)
+    bm.free()
+    bpy.data.meshes.remove(me)
+    return v, f
+
+
+# Shorts: the band of skin between mid-thigh and the waist, as its own material.
+hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
+hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
+skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"], (hem_z, waist_z))
+# Give the shorts a plain front panel: pull the middle of the front onto one
+# smooth plane just ahead of the thighs, fading out to the sides and the waist.
+sv = skin["verts"]
+band = (sv[:, 2] > hem_z - 0.01) & (sv[:, 2] < waist_z)
+flank = band & (np.abs(sv[:, 0]) > 0.07) & (np.abs(sv[:, 0]) < 0.11)
+panel_y = np.percentile(sv[flank, 1], 2) - 0.018
+across = np.clip((0.115 - np.abs(sv[:, 0])) / 0.05, 0, 1)   # fully flat for |x| < 6.5 cm
+up = np.clip((waist_z - sv[:, 2]) / (waist_z - hip_z - 0.02), 0, 1)
+blend = np.where(band & (sv[:, 1] < 0), (across * across * (3 - 2 * across)) * up, 0.0)
+sv[:, 1] = sv[:, 1] + (panel_y - sv[:, 1]) * blend
+# Folds that were flattened onto the panel now face backwards: drop them.
+tri = sv[skin["faces"]]
+facing_back = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 1] >= 0
+flat = (blend[skin["faces"]] > 0.98).all(axis=1)
+skin["faces"] = skin["faces"][~(flat & facing_back)]
+
+under_pts = np.concatenate([p["verts"] for p in under_parts])
+under_w = np.concatenate([skin_weights(p) for p in under_parts])
+near_d, near_i = cKDTree(under_pts).query(skin["verts"], k=8)
+falloff = 1.0 / (near_d + 0.004) ** 2
+skin_w = (under_w[near_i] * falloff[:, :, None]).sum(axis=1)
+skin_w /= skin_w.sum(axis=1, keepdims=True)
+all_verts.append(skin["verts"])
+all_faces.append(skin["faces"] + offset)
+lower = [BONE_NAMES.index(b) for b in ("pelvis", "spine_01", "thigh_l", "thigh_r")]
+centre = skin["verts"][skin["faces"]].mean(axis=1)
+on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
+shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
+all_mats.append(np.where(shorts, material_names.index("shorts"), material_names.index("skin")))
+all_w.append(skin_w)
 V = np.concatenate(all_verts)
 F = np.concatenate(all_faces)
 MAT = np.concatenate(all_mats)
@@ -442,8 +511,15 @@ for name in material_names:
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     bsdf = m.node_tree.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = BONE_COLOR if name == "bone" else MUSCLE_COLOR
-    bsdf.inputs["Roughness"].default_value = 0.55
+    bsdf.inputs["Base Color"].default_value = {"skin": SKIN_COLOR, "shorts": SHORTS_COLOR}.get(
+        name, MUSCLE_COLOR)
+    bsdf.inputs["Roughness"].default_value = 0.85 if name == "shorts" else 0.55
+    if name == "skin":
+        bsdf.inputs["Alpha"].default_value = SKIN_COLOR[3]
+        if hasattr(m, "surface_render_method"):
+            m.surface_render_method = "BLENDED"
+        else:
+            m.blend_method = "BLEND"
     bsdf.inputs["Metallic"].default_value = 0.0
     mesh.materials.append(m)
 
