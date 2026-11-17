@@ -46,6 +46,20 @@ void main() {
     expect(RepTimeline.phaseAt(0.97), RepPhase.ready);
   });
 
+  test('a measured contraction maps back to the same pose', () {
+    for (final c in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]) {
+      final t = RepTimeline.timeForContraction(c);
+      expect(t, inInclusiveRange(RepTimeline.pullStart, RepTimeline.holdStart));
+      expect(RepTimeline.contractionAt(t), closeTo(c, 1e-9));
+    }
+  });
+
+  test('seated exercises are marked', () {
+    expect(cableExerciseByName('Lat Pulldown')!.seated, isTrue);
+    expect(cableExerciseByName('Seated Cable Row')!.seated, isTrue);
+    expect(cableExerciseByName('Face Pull')!.seated, isFalse);
+  });
+
   test('prime movers are highlighted more than assisting muscles', () {
     final curl = cableExerciseByName('Cable Bicep Curl')!;
     for (final t in [0.0, 0.3, 0.5, 0.8]) {

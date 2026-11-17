@@ -1,19 +1,18 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:model_viewer_plus/model_viewer_plus.dart';
-import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
 
 import '../models/cable_exercise.dart';
 import '../theme/app_theme.dart';
+import '../widgets/anatomy_viewer.dart';
+import 'cable_track_screen.dart';
 
 /// Movement Studio: 3D muscle guide for the cable-machine workouts.
 ///
-/// Shows a rigged human figure (skin over real muscle shapes from BodyParts3D,
-/// see tools/build_anatomy_model.py) performing the selected exercise. The
-/// muscles that exercise trains show through the skin in their own shape:
-/// green for prime movers, amber for assisting muscles, brighter as they
-/// contract. The skin can be switched off to see the full muscle anatomy.
+/// Shows a human figure on the machine (skin over real muscle shapes from
+/// BodyParts3D, see tools/build_anatomy_model.py) performing the selected
+/// exercise, seated or standing as the exercise is really done. The muscles
+/// it trains show through the skin in their own shape: green for prime
+/// movers, amber for assisting muscles, brighter as they contract. The skin
+/// can be switched off to see the full muscle anatomy.
 class AnatomyStudioScreen extends StatefulWidget {
   /// Workout to open on (a name from the workout list). Defaults to the first.
   final String? initialExercise;
@@ -25,11 +24,9 @@ class AnatomyStudioScreen extends StatefulWidget {
 
 class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
   static const Color _secondaryColor = Color(0xFFFFB833);
-  static const String _modelAsset = 'assets/models/anatomy_cable.glb';
 
+  final AnatomyViewerController _viewer = AnatomyViewerController();
   late CableExercise _exercise;
-  late final Widget _viewer;
-  WebViewController? _web;
 
   bool _ready = false;
   bool _playing = true;
@@ -43,157 +40,14 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
     super.initState();
     _exercise = cableExerciseByName(widget.initialExercise ?? '') ??
         cableExercises.first;
-    // Built once: rebuilding the widget with new arguments would reload the
-    // whole model. Everything after this goes through JavaScript.
-    _viewer = ModelViewer(
-      id: 'gp',
-      src: _modelAsset,
-      alt: 'Anatomy model performing a cable exercise',
-      backgroundColor: const Color(0xFF12171A),
-      loading: Loading.eager,
-      autoPlay: true,
-      animationName: _exercise.animation,
-      cameraControls: true,
-      cameraOrbit: _exercise.cameraOrbit,
-      fieldOfView: '28deg',
-      interactionPrompt: InteractionPrompt.none,
-      touchAction: TouchAction.none,
-      disableTap: true,
-      ar: false,
-      exposure: 1.0,
-      shadowIntensity: 0.7,
-      shadowSoftness: 0.9,
-      debugLogging: false,
-      relatedJs: _script(_exercise),
-      javascriptChannels: {
-        JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
-      },
-      onWebViewCreated: (c) => _web = c,
-    );
   }
 
-  static Map<String, Object> _config(CableExercise e) => {
-        'animation': e.animation,
-        'primary': e.primary,
-        'secondary': e.secondary,
-        'orbit': e.cameraOrbit,
-      };
-
-  /// Page script: tints the muscle materials every frame from the rep time and
-  /// reports that time back. The timeline numbers mirror [RepTimeline].
-  static String _script(CableExercise initial) => '''
-(function () {
-  const mv = document.querySelector('#gp');
-  // Resting muscles: grey under the skin, anatomical red with the skin off.
-  const UNDER_SKIN = [0.42, 0.43, 0.46];
-  const BARE = [0.42, 0.22, 0.20];
-  const SKIN = [0.30, 0.31, 0.35];
-  const SKIN_ALPHA = 0.45;
-  let BASE = UNDER_SKIN, skinAlpha = SKIN_ALPHA, skinDirty = true;
-  const PRIMARY = [0.0, 1.0, 0.53];
-  const SECONDARY = [1.0, 0.72, 0.20];
-  let cfg = ${jsonEncode(_config(initial))};
-  let focus = null, last = {}, lastSent = 0, paused = false;
-
-  function smooth(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
-  function contraction(t) {
-    if (t < ${RepTimeline.pullStart}) return 0;
-    if (t < ${RepTimeline.holdStart}) return smooth((t - ${RepTimeline.pullStart}) / ${RepTimeline.holdStart - RepTimeline.pullStart});
-    if (t < ${RepTimeline.returnStart}) return 1;
-    if (t < ${RepTimeline.restStart}) return 1 - smooth((t - ${RepTimeline.returnStart}) / ${RepTimeline.restStart - RepTimeline.returnStart});
-    return 0;
-  }
-  function repTime() {
-    const d = mv.duration || 4;
-    return (((mv.currentTime || 0) % d) + d) % d / d;
-  }
-  function paint() {
-    if (!mv.model) return;
-    const c = contraction(repTime());
-    for (const m of mv.model.materials) {
-      const n = m.name;
-      if (n === 'skin') {
-        if (skinDirty) {
-          skinDirty = false;
-          m.pbrMetallicRoughness.setBaseColorFactor([SKIN[0], SKIN[1], SKIN[2], skinAlpha]);
-        }
-        continue;
-      }
-      if (n === 'shorts') continue;
-      let k = 0, tone = PRIMARY;
-      if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
-      else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
-      if (focus) { k = n === focus ? 1 : k * 0.15; }
-      const key = Math.round(k * 40) + (tone === PRIMARY ? 'p' : 's');
-      if (last[n] === key) continue;
-      last[n] = key;
-      m.pbrMetallicRoughness.setBaseColorFactor([
-        BASE[0] + (tone[0] - BASE[0]) * k,
-        BASE[1] + (tone[1] - BASE[1]) * k,
-        BASE[2] + (tone[2] - BASE[2]) * k, 1]);
-      // Glow strongly enough to read through the skin layer.
-      const glow = skinAlpha > 0 ? k : k * 0.3;
-      m.setEmissiveFactor([tone[0] * glow, tone[1] * glow, tone[2] * glow]);
-      if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
-    }
-  }
-  function tick(now) {
-    paint();
-    if (now - lastSent > 90 && window.GP) {
-      lastSent = now;
-      GP.postMessage(JSON.stringify({ t: repTime(), ready: !!mv.model }));
-    }
-    requestAnimationFrame(tick);
-  }
-  mv.addEventListener('load', function () {
-    last = {};
-    skinDirty = true;
-    mv.animationName = cfg.animation;
-    if (!paused) mv.play();
-  });
-  window.gp = {
-    exercise: function (c) {
-      cfg = c; focus = null; last = {};
-      mv.animationName = c.animation;
-      mv.currentTime = 0;
-      mv.cameraOrbit = c.orbit;
-      if (!paused) mv.play();
-    },
-    play: function () { paused = false; mv.play(); },
-    pause: function () { paused = true; mv.pause(); },
-    speed: function (s) { mv.timeScale = s; },
-    seek: function (f) { mv.currentTime = f * (mv.duration || 4); },
-    orbit: function (o) { mv.cameraOrbit = o; },
-    focus: function (g) { focus = g; last = {}; },
-    skin: function (on) {
-      skinAlpha = on ? SKIN_ALPHA : 0.0;
-      BASE = on ? UNDER_SKIN : BARE;
-      skinDirty = true;
-      last = {};
-    }
-  };
-  requestAnimationFrame(tick);
-})();
-''';
-
-  void _js(String call) {
-    _web?.runJavaScript('if (window.gp) { window.gp.$call; }');
-  }
-
-  void _onMessage(String raw) {
-    if (!mounted) return;
-    try {
-      final data = jsonDecode(raw) as Map<String, dynamic>;
-      final t = (data['t'] as num).toDouble();
-      final ready = data['ready'] == true;
-      if ((t - _t).abs() > 0.004 || ready != _ready) {
-        setState(() {
-          _t = t;
-          _ready = ready;
-        });
-      }
-    } catch (_) {
-      // A malformed message only costs one UI update.
+  void _onStatus(double t, bool ready) {
+    if ((t - _t).abs() > 0.004 || ready != _ready) {
+      setState(() {
+        _t = t;
+        _ready = ready;
+      });
     }
   }
 
@@ -204,27 +58,31 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
       _focus = null;
       _t = 0;
     });
-    _js('exercise(${jsonEncode(_config(e))})');
+    _viewer.showExercise(e);
   }
 
   void _togglePlayback() {
     setState(() => _playing = !_playing);
-    _js(_playing ? 'play()' : 'pause()');
+    if (_playing) {
+      _viewer.play();
+    } else {
+      _viewer.pause();
+    }
   }
 
   void _setSpeed(double v) {
     setState(() => _speed = v);
-    _js('speed($v)');
+    _viewer.setSpeed(v);
   }
 
   void _toggleSkin() {
     setState(() => _skin = !_skin);
-    _js('skin($_skin)');
+    _viewer.setSkin(_skin);
   }
 
   void _setFocus(String group) {
     setState(() => _focus = _focus == group ? null : group);
-    _js('focus(${jsonEncode(_focus)})');
+    _viewer.setFocus(_focus);
   }
 
   @override
@@ -303,12 +161,18 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
       borderRadius: BorderRadius.circular(22),
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF12171A),
+          color: AnatomyViewer.background,
           borderRadius: BorderRadius.circular(22),
           border: Border.all(color: AppTheme.cardBgLight),
         ),
         child: Stack(children: [
-          Positioned.fill(child: _viewer),
+          Positioned.fill(
+            child: AnatomyViewer(
+              exercise: _exercise,
+              controller: _viewer,
+              onStatus: _onStatus,
+            ),
+          ),
           if (!_ready)
             const Positioned.fill(
               child: ColoredBox(
@@ -336,10 +200,10 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
             left: 12,
             top: 12,
             child: Row(children: [
-              _viewChip('FRONT', '0deg 80deg 118%'),
-              _viewChip('SIDE', '90deg 80deg 118%'),
-              _viewChip('BACK', '180deg 80deg 118%'),
-              _viewChip('BEST', _exercise.cameraOrbit),
+              _viewChip('FRONT', '0deg 80deg 5.4m'),
+              _viewChip('SIDE', '90deg 80deg 5.4m'),
+              _viewChip('BACK', '180deg 80deg 5.4m'),
+              _viewChip('BEST', null),
             ]),
           ),
           Positioned(
@@ -395,10 +259,11 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
     );
   }
 
-  Widget _viewChip(String label, String orbit) => Padding(
+  Widget _viewChip(String label, String? orbit) => Padding(
         padding: const EdgeInsets.only(right: 6),
         child: GestureDetector(
-          onTap: () => _js('orbit(${jsonEncode(orbit)})'),
+          onTap: () =>
+              orbit == null ? _viewer.resetCamera() : _viewer.setOrbit(orbit),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
@@ -465,13 +330,13 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
               value: _t.clamp(0.0, 1.0),
               activeColor: AppTheme.neonGreen,
               inactiveColor: AppTheme.cardBgLight,
-              onChangeStart: (_) => _js('pause()'),
+              onChangeStart: (_) => _viewer.pause(),
               onChanged: (v) {
                 setState(() => _t = v);
-                _js('seek($v)');
+                _viewer.seek(v);
               },
               onChangeEnd: (_) {
-                if (_playing) _js('play()');
+                if (_playing) _viewer.play();
               },
             ),
           ),
@@ -546,6 +411,20 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
                     color: AppTheme.textSecondary, fontSize: 12)),
           ),
         ]),
+      ),
+      const SizedBox(height: 10),
+      SizedBox(
+        width: double.infinity,
+        child: ElevatedButton.icon(
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => CableTrackScreen(workoutName: _exercise.name),
+            ),
+          ),
+          icon: const Icon(Icons.sensors_rounded, size: 18),
+          label: const Text('Track this exercise live'),
+        ),
       ),
       const SizedBox(height: 20),
       const _SectionTitle('PRIMARY MUSCLES  ·  TAP TO ISOLATE'),

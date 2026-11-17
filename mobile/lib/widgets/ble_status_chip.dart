@@ -17,15 +17,20 @@ class BleStatusChip extends StatelessWidget {
         final busy = state == BleConnectionState.scanning ||
             state == BleConnectionState.connecting;
         final usb = BleService.instance.testLink.value;
-        final (color, label, icon) = usb && state == BleConnectionState.connected
-            ? (const Color(0xFFFFC94D), 'USB test', Icons.usb_rounded)
-            : _style(state);
+        final sim = BleService.instance.simulation.value;
+        final connected = state == BleConnectionState.connected;
+        final (color, label, icon) = sim && connected
+            ? (const Color(0xFFFFC94D), 'Simulation', Icons.science_rounded)
+            : usb && connected
+                ? (const Color(0xFFFFC94D), 'USB test', Icons.usb_rounded)
+                : _style(state);
         return InkWell(
           borderRadius: BorderRadius.circular(999),
           onTap: busy
               ? null
               : () {
-                  if (state != BleConnectionState.connected) {
+                  // Tapping while simulating looks for the real tracker.
+                  if (state != BleConnectionState.connected || sim) {
                     BleService.instance.connect();
                   }
                 },

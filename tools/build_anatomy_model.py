@@ -108,8 +108,8 @@ RULES = [
 # shoulder-blade retraction (deg) at start/peak.
 EXERCISES = {
     "LatPulldown": dict(
-        upper=((0.45, -0.15, 0.88), (0.78, 0.12, -0.62)),
-        fore=((0.12, -0.10, 0.99), (-0.12, -0.22, 0.97)),
+        upper=((0.45, -0.15, 0.88), (0.58, 0.10, -0.81)),
+        fore=((0.12, -0.10, 0.99), (-0.06, -0.46, 0.89)),
         lean=(0, -8), retract=(-4, 10)),
     "SeatedCableRow": dict(
         upper=((0.12, -0.95, -0.30), (0.28, 0.72, -0.63)),
@@ -132,6 +132,32 @@ EXERCISES = {
         fore=((-0.05, -0.99, 0.10), (0.12, -0.45, 0.88)),
         lean=(0, -4), retract=(-8, 14)),
 }
+
+
+# Seated exercises: thigh / shin directions (left leg) and hip height (m).
+# hip=None puts the thighs level, feet flat on the floor.
+SEATED = {
+    "LatPulldown": dict(thigh=(0.10, -0.995, 0.0), calf=(0.0, 0.0, -1.0), hip=None),
+    "SeatedCableRow": dict(thigh=(0.09, -0.97, 0.20), calf=(0.0, -0.72, -0.69), hip=0.47),
+}
+
+# The machine around the figure, per exercise (metres; figure stands at the
+# origin facing -Y). p1 = pulley the handle hangs from, p2 = pulley above the
+# weight stack, stack = foot of the weight stack, bar = handle length
+# (None = follow the hands, 0 = no bar). Chest fly has one pulley per hand.
+MACHINE = {
+    "LatPulldown": dict(p1=(0, -0.20, 2.12), p2=(0, -0.95, 2.12), stack=(0, -0.95), bar=1.15),
+    "SeatedCableRow": dict(p1=(0, -1.45, 0.80), p2=(0, -1.75, 2.05), stack=(0, -1.75), bar=0.24),
+    "TricepPushdown": dict(p1=(0, -0.52, 2.12), p2=(0, -1.00, 2.12), stack=(0, -1.00), bar=0.50),
+    "CableBicepCurl": dict(p1=(0, -0.72, 0.14), p2=(0, -1.05, 2.05), stack=(0, -1.05), bar=0.50),
+    "CableChestFly": dict(p1=(0.98, 0.25, 1.95), p2=(-0.98, 0.25, 1.95), stack=(0.98, 0.25), bar=0),
+    "FacePull": dict(p1=(0, -1.35, 1.62), p2=(0, -1.62, 2.05), stack=(0, -1.62), bar=None),
+}
+STACK_TRAVEL = 0.32          # how far the weight stack rises at full contraction
+STACK_BASE, STACK_HEIGHT = 0.10, 0.36
+PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
+              "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b"]
+STATIC_MATERIALS = ["skin", "shorts", "equipment", "cable", "tracker", "pad"]
 
 
 # ----------------------------------------------------------------- data ----
@@ -424,7 +450,7 @@ def group_of(part):
 scene = bpy.context.scene
 scene.render.fps = FPS
 
-material_names = [g for g, _ in GROUPS] + ["other_muscle", "skin", "shorts"]
+material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
 all_verts, all_faces, all_mats, all_w = [], [], [], []
 offset = 0
 for p in parts:
@@ -489,6 +515,71 @@ on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
 shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
 all_mats.append(np.where(shorts, material_names.index("shorts"), material_names.index("skin")))
 all_w.append(skin_w)
+offset += len(skin["verts"])
+
+
+# ---------------------------------------------------------------- props ----
+def box_mesh(centre, size):
+    c, h = np.array(centre, float), np.array(size, float) / 2
+    v = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]) * h + c
+    f = np.array([[0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5], [0, 4, 5], [0, 5, 1],
+                  [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3]])
+    return v, f
+
+
+def rod_mesh(a, b, radius, sides=10):
+    """Closed cylinder from a to b."""
+    a, b = np.array(a, float), np.array(b, float)
+    axis = (b - a) / np.linalg.norm(b - a)
+    side = np.cross(axis, [0, 0, 1] if abs(axis[2]) < 0.9 else [1, 0, 0])
+    side /= np.linalg.norm(side)
+    other = np.cross(axis, side)
+    ring = [math.cos(2 * math.pi * k / sides) * side + math.sin(2 * math.pi * k / sides) * other
+            for k in range(sides)]
+    v = np.array([a + r * radius for r in ring] + [b + r * radius for r in ring] + [a, b])
+    f = []
+    for k in range(sides):
+        n = (k + 1) % sides
+        f += [[k, n, sides + n], [k, sides + n, sides + k],
+              [2 * sides, n, k], [2 * sides + 1, sides + k, sides + n]]
+    return v, np.array(f)
+
+
+# Each prop is modelled around the origin and moved by its own bone.
+PROPS = [
+    ("prop_bar", "equipment", rod_mesh((0, -0.5, 0), (0, 0.5, 0), 0.014)),
+    ("prop_cable_a", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
+    ("prop_cable_b", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
+    ("prop_cable_c", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
+    ("prop_stack", "equipment", box_mesh((0, 0, STACK_HEIGHT / 2), (0.30, 0.11, STACK_HEIGHT))),
+    # The Gympath tracker, clipped to the front of the top plate.
+    ("prop_stack", "tracker", box_mesh((0, 0.07, STACK_HEIGHT - 0.05), (0.075, 0.03, 0.045))),
+    ("prop_frame", "equipment", rod_mesh((0.17, 0, 0), (0.17, 0, 2.12), 0.012, 8)),
+    ("prop_frame", "equipment", rod_mesh((-0.17, 0, 0), (-0.17, 0, 2.12), 0.012, 8)),
+    ("prop_frame", "equipment", box_mesh((0, 0, 0.03), (0.46, 0.22, 0.06))),
+    ("prop_frame", "equipment", box_mesh((0, 0, 2.14), (0.46, 0.10, 0.05))),
+    ("prop_pulley_a", "equipment", rod_mesh((-0.02, 0, 0), (0.02, 0, 0), 0.055, 14)),
+    ("prop_pulley_b", "equipment", rod_mesh((-0.02, 0, 0), (0.02, 0, 0), 0.055, 14)),
+    # Pulldown seat: pad, post and the roller that holds the thighs down.
+    ("prop_seat_a", "pad", box_mesh((0, 0, -0.035), (0.40, 0.36, 0.07))),
+    ("prop_seat_a", "equipment", box_mesh((0, 0, -0.27), (0.07, 0.07, 0.40))),
+    ("prop_seat_a", "pad", rod_mesh((-0.26, -0.30, 0.215), (0.26, -0.30, 0.215), 0.05, 12)),
+    ("prop_seat_a", "equipment", box_mesh((0, -0.30, -0.05), (0.05, 0.05, 0.44))),
+    # Row bench: long pad, two legs and the foot plate.
+    ("prop_seat_b", "pad", box_mesh((0, -0.05, -0.035), (0.34, 0.95, 0.07))),
+    ("prop_seat_b", "equipment", box_mesh((0, 0.25, -0.27), (0.07, 0.07, 0.40))),
+    ("prop_seat_b", "equipment", box_mesh((0, -0.35, -0.27), (0.07, 0.07, 0.40))),
+    ("prop_seat_b", "equipment", box_mesh((0, -0.92, -0.16), (0.50, 0.04, 0.34))),
+]
+prop_ranges = []
+for bone, mat, (pv, pf) in PROPS:
+    all_verts.append(pv)
+    all_faces.append(pf + offset)
+    all_mats.append(np.full(len(pf), material_names.index(mat)))
+    all_w.append(np.zeros((len(pv), len(BONE_NAMES))))
+    prop_ranges.append((bone, offset, offset + len(pv)))
+    offset += len(pv)
+
 V = np.concatenate(all_verts)
 F = np.concatenate(all_faces)
 MAT = np.concatenate(all_mats)
@@ -511,16 +602,22 @@ for name in material_names:
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     bsdf = m.node_tree.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = {"skin": SKIN_COLOR, "shorts": SHORTS_COLOR}.get(
-        name, MUSCLE_COLOR)
-    bsdf.inputs["Roughness"].default_value = 0.85 if name == "shorts" else 0.55
+    bsdf.inputs["Base Color"].default_value = {
+        "skin": SKIN_COLOR, "shorts": SHORTS_COLOR, "equipment": (0.11, 0.12, 0.14, 1.0),
+        "cable": (0.55, 0.57, 0.60, 1.0), "tracker": (0.0, 1.0, 0.53, 1.0),
+        "pad": (0.035, 0.035, 0.04, 1.0)}.get(name, MUSCLE_COLOR)
+    bsdf.inputs["Roughness"].default_value = {
+        "shorts": 0.85, "pad": 0.8, "equipment": 0.4, "cable": 0.35}.get(name, 0.55)
+    if name == "tracker":
+        bsdf.inputs["Emission Color"].default_value = (0.0, 1.0, 0.53, 1.0)
+        bsdf.inputs["Emission Strength"].default_value = 1.5
     if name == "skin":
         bsdf.inputs["Alpha"].default_value = SKIN_COLOR[3]
         if hasattr(m, "surface_render_method"):
             m.surface_render_method = "BLENDED"
         else:
             m.blend_method = "BLEND"
-    bsdf.inputs["Metallic"].default_value = 0.0
+    bsdf.inputs["Metallic"].default_value = 0.7 if name in ("equipment", "cable") else 0.0
     mesh.materials.append(m)
 
 body = bpy.data.objects.new("Anatomy", mesh)
@@ -537,6 +634,9 @@ for name, (head, tail, parent) in BONES.items():
 for name, (head, tail, parent) in BONES.items():
     if parent:
         arm_data.edit_bones[name].parent = arm_data.edit_bones[parent]
+for name in PROP_BONES:
+    eb = arm_data.edit_bones.new(name)
+    eb.head, eb.tail = Vector((0, 0, 0)), Vector((0, 0.1, 0))
 bpy.ops.object.mode_set(mode="OBJECT")
 
 for k, name in enumerate(BONE_NAMES):
@@ -544,6 +644,11 @@ for k, name in enumerate(BONE_NAMES):
     col = W[:, k]
     for i in np.nonzero(col > 0.01)[0]:
         vg.add([int(i)], float(col[i]), "REPLACE")
+for name in PROP_BONES:
+    vg = body.vertex_groups.new(name=name)
+    for bone, start, end in prop_ranges:
+        if bone == name:
+            vg.add(list(range(start, end)), 1.0, "REPLACE")
 
 body.parent = arm
 body.modifiers.new("Armature", "ARMATURE").object = arm
@@ -591,7 +696,67 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-def solve_pose(ex, c):
+def place(start, end=None, scale=None):
+    """Transform for a prop: moved to `start`; with `end`, its +Y axis is aimed
+    at `end` and stretched to reach it."""
+    start = Vector(start)
+    if end is None:
+        m = Matrix.Translation(start)
+        if scale is not None:
+            m = m @ Matrix.Diagonal((scale, scale, scale, 1))
+        return m
+    d = Vector(end) - start
+    rot = Vector((0, 1, 0)).rotation_difference(d.normalized()).to_matrix().to_4x4()
+    return Matrix.Translation(start) @ rot @ Matrix.Diagonal((1, max(d.length, 1e-4), 1, 1))
+
+
+HIDDEN = Matrix.Diagonal((1e-4, 1e-4, 1e-4, 1))
+P0 = REST["pelvis"].to_translation()
+HIP_REST = Vector(J["hip_l"])
+SHANK = (Vector(J["ankle_l"]) - Vector(J["knee_l"])).length
+
+
+def solve_props(ex_name, pose, c, hip_z):
+    """Where the machine parts are for this pose."""
+    cfg = MACHINE[ex_name]
+    grips = {}
+    for s in "lr":
+        m = pose[f"hand_{s}"]
+        grips[s] = m.to_translation() + (m.to_3x3() @ Vector((0, 1, 0))).normalized() * 0.075
+    mid = (grips["l"] + grips["r"]) / 2
+    p1, p2 = Vector(cfg["p1"]), Vector(cfg["p2"])
+    foot = Vector((cfg["stack"][0], cfg["stack"][1], 0))
+    top = foot + Vector((0, 0, STACK_BASE + STACK_HEIGHT + STACK_TRAVEL * c))
+    out = {name: HIDDEN.copy() for name in PROP_BONES}
+    out["prop_stack"] = place(foot + Vector((0, 0, STACK_BASE + STACK_TRAVEL * c)))
+    out["prop_frame"] = place(foot)
+    out["prop_pulley_a"], out["prop_pulley_b"] = place(p1), place(p2)
+    if cfg["bar"] == 0:                       # one cable per hand (chest fly)
+        out["prop_cable_a"] = place(grips["l"], p1)
+        out["prop_cable_c"] = place(grips["r"], p2)
+        out["prop_cable_b"] = place(p1 + Vector((0, 0, 0.05)), top)
+    else:
+        across = grips["l"] - grips["r"]
+        length = cfg["bar"] if cfg["bar"] else across.length + 0.06
+        rot = Vector((0, 1, 0)).rotation_difference(across.normalized()).to_matrix().to_4x4()
+        out["prop_bar"] = Matrix.Translation(mid) @ rot @ Matrix.Diagonal((1, length, 1, 1))
+        out["prop_cable_a"] = place(mid, p1)
+        out["prop_cable_c"] = place(p1, p2)
+        out["prop_cable_b"] = place(p2, top)
+    if ex_name == "LatPulldown":
+        out["prop_seat_a"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
+    if ex_name == "SeatedCableRow":
+        out["prop_seat_b"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
+    return out
+
+
+def solve_pose(ex_name, c):
+    ex = EXERCISES[ex_name]
+    seat = SEATED.get(ex_name)
+    hip_z = HIP_REST.z
+    if seat:
+        hip_z = seat["hip"] if seat["hip"] else Vector(J["ankle_l"]).z + SHANK
+    pelvis_pos = P0 + Vector((0, 0, hip_z - HIP_REST.z))
     pose = {}
     lean = math.radians(lerp(ex["lean"][0], ex["lean"][1], c))
     retract = math.radians(lerp(ex["retract"][0], ex["retract"][1], c))
@@ -601,13 +766,23 @@ def solve_pose(ex, c):
             d = slerp(ex[key][0], ex[key][1], c)
             aims[bone] = Vector((d.x * sx, d.y, d.z))
         aims[f"hand_{s}"] = aims[f"lowerarm_{s}"]
+        if seat:
+            for bone, key in ((f"thigh_{s}", "thigh"), (f"calf_{s}", "calf")):
+                d = Vector(seat[key]).normalized()
+                aims[bone] = Vector((d.x * sx, d.y, d.z))
     for name in ORDER:
+        if name in PROP_BONES:
+            continue
         parent = PARENT[name]
         base = REST[name].copy() if parent is None else \
             pose[parent] @ REST[parent].inverted() @ REST[name]
         m = base
         here = Matrix.Translation(base.to_translation())
-        if name in ("spine_01", "spine_02", "spine_03"):
+        if name == "pelvis":
+            m = Matrix.Translation(pelvis_pos) @ base.to_3x3().to_4x4()
+        elif name.startswith("foot") and seat and seat["hip"] is None:
+            m = here @ REST[name].to_3x3().to_4x4()      # feet flat on the floor
+        elif name in ("spine_01", "spine_02", "spine_03"):
             # Lean from the lower back; + = forward (towards -Y).
             m = here @ Matrix.Rotation(lean / 3, 4, "X") @ base.to_3x3().to_4x4()
         elif name.startswith("clavicle"):
@@ -619,6 +794,8 @@ def solve_pose(ex, c):
             swing = current.rotation_difference(aims[name]).to_matrix()
             m = here @ (swing @ base.to_3x3()).to_4x4()
         pose[name] = m
+    for name, transform in solve_props(ex_name, pose, c, hip_z).items():
+        pose[name] = transform @ REST[name]
     return pose
 
 
@@ -626,13 +803,19 @@ def key_pose(pose, frame, last):
     for name in ORDER:
         parent = PARENT[name]
         base = REST[name] if parent is None else pose[parent] @ REST[parent].inverted() @ REST[name]
-        q = (base.inverted() @ pose[name]).to_quaternion()
+        loc, q, scale = (base.inverted() @ pose[name]).decompose()
         if name in last and last[name].dot(q) < 0:
             q.negate()
         last[name] = q.copy()
         pb = arm.pose.bones[name]
         pb.rotation_quaternion = q
         pb.keyframe_insert("rotation_quaternion", frame=frame)
+        if name == "pelvis" or name in PROP_BONES:
+            pb.location = loc
+            pb.keyframe_insert("location", frame=frame)
+        if name in PROP_BONES:
+            pb.scale = scale
+            pb.keyframe_insert("scale", frame=frame)
 
 
 frames = int(round(REP_SECONDS * FPS))
@@ -644,7 +827,7 @@ for ex_name, ex in EXERCISES.items():
     arm.animation_data.action = action
     last = {}
     for f in range(0, frames + 1, 2):
-        key_pose(solve_pose(ex, contraction(f / frames)), f, last)
+        key_pose(solve_pose(ex_name, contraction(f / frames)), f, last)
     actions[ex_name] = action
 slot = arm.animation_data.action_slot if hasattr(arm.animation_data, "action_slot") else None
 arm.animation_data.action = None

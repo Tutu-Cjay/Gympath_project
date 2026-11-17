@@ -6,6 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/motion_data.dart';
 import '../models/track_sample.dart';
+import 'track_simulator.dart';
 
 enum BleConnectionState { disconnected, scanning, connecting, connected, error }
 
@@ -85,8 +86,45 @@ class BleService {
   /// True while data comes over the USB test link instead of BLE.
   final ValueNotifier<bool> testLink = ValueNotifier<bool>(false);
 
+  // Simulation: a built-in stand-in for the tracker (see TrackSimulator), so
+  // the app can be tried and demoed without the hardware.
+  TrackSimulator? _simulator;
+  Timer? _simTimer;
+  static const int _simPeriodMs = 20; // 50 Hz, like the firmware
+
+  /// True while samples come from the built-in simulator.
+  final ValueNotifier<bool> simulation = ValueNotifier<bool>(false);
+
   bool get isConnected =>
       connectionState.value == BleConnectionState.connected;
+
+  /// Replace the tracker with the simulator. It answers START / STOP / ZERO
+  /// and streams the same samples, so every screen works unchanged.
+  Future<bool> startSimulation() async {
+    if (simulation.value) return true;
+    await disconnect();
+    _userDisconnected = true; // no Bluetooth reconnect attempts meanwhile
+    lastError.value = null;
+    final sim = TrackSimulator();
+    _simulator = sim;
+    _simTimer = Timer.periodic(const Duration(milliseconds: _simPeriodMs), (_) {
+      _trackController.add(sim.step(_simPeriodMs));
+    });
+    simulation.value = true;
+    trackSupported.value = true;
+    connectionState.value = BleConnectionState.connected;
+    return true;
+  }
+
+  void _stopSimulation() {
+    if (_simulator == null) return;
+    _simTimer?.cancel();
+    _simTimer = null;
+    _simulator = null;
+    simulation.value = false;
+    trackSupported.value = false;
+    connectionState.value = BleConnectionState.disconnected;
+  }
 
   /// Connect to serial_bridge.py. From an Android emulator the PC is 10.0.2.2.
   Future<bool> connectTestLink({String host = '10.0.2.2', int port = 7700}) async {
@@ -153,6 +191,7 @@ class BleService {
   }
 
   Future<bool> connect() async {
+    _stopSimulation(); // a real connection replaces the simulator
     if (isConnected) return true;
     _userDisconnected = false;
     lastError.value = null;
@@ -210,6 +249,7 @@ class BleService {
 
   Future<void> disconnect() async {
     _userDisconnected = true; // suppress auto-reconnect
+    _stopSimulation();
     _closeTestLink();
     await _motionSub?.cancel();
     _motionSub = null;
@@ -451,6 +491,18 @@ class BleService {
   /// Send START / STOP / ZERO to the device. Each write carries a fresh
   /// sequence byte so the firmware acts on repeated commands exactly once.
   Future<bool> sendCommand(TrackCommand cmd) async {
+    final sim = _simulator;
+    if (sim != null) {
+      switch (cmd) {
+        case TrackCommand.start:
+          sim.start();
+        case TrackCommand.stop:
+          sim.stop();
+        case TrackCommand.zero:
+          sim.zero();
+      }
+      return true;
+    }
     final socket = _testSocket;
     if (socket != null) {
       _cmdSeq = (_cmdSeq % 255) + 1;

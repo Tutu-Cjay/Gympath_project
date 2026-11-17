@@ -7,6 +7,8 @@
 /// muscle geometry.
 library;
 
+import 'dart:math' as math;
+
 /// Phases of one repetition. The boundaries match the animation timeline in
 /// tools/build_anatomy_model.py (T_PULL, T_HOLD, T_RETURN, T_REST).
 enum RepPhase { ready, pull, squeeze, release }
@@ -51,6 +53,15 @@ class RepTimeline {
       return 1 - _smooth((u - returnStart) / (restStart - returnStart));
     }
     return 0;
+  }
+
+  /// Rep time (0..1) on the way up at which the contraction equals [c].
+  /// Used to pose the model from a measured position instead of a clock.
+  static double timeForContraction(double c) {
+    final k = c.clamp(0.0, 1.0);
+    // Inverse of the smoothstep used in [contractionAt].
+    final u = 0.5 - math.sin(math.asin(1 - 2 * k) / 3);
+    return pullStart + u * (holdStart - pullStart);
   }
 
   static RepPhase phaseAt(double t) {
@@ -104,8 +115,14 @@ class CableExercise {
   final List<String> cueTitles;
   final List<String> cueDetails;
 
-  /// Camera angle that shows the working muscles best (model-viewer orbit).
+  /// Camera that shows the working muscles and the machine best
+  /// (model-viewer orbit and target; the figure stands at the origin, y is
+  /// up and +z is in front of it).
   final String cameraOrbit;
+  final String cameraTarget;
+
+  /// True when the exercise is done sitting (the model sits on a bench).
+  final bool seated;
 
   const CableExercise({
     required this.name,
@@ -116,6 +133,8 @@ class CableExercise {
     required this.cueTitles,
     required this.cueDetails,
     required this.cameraOrbit,
+    required this.cameraTarget,
+    this.seated = false,
   });
 
   /// 0..1 highlight strength of a muscle group at rep time [t].
@@ -131,6 +150,7 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Lat Pulldown',
     animation: 'LatPulldown',
+    seated: true,
     primary: ['lats'],
     secondary: ['biceps', 'rhomboids', 'rear_delts', 'traps', 'forearms'],
     setup: 'Clip the tracker on the weight stack. Sit tall, thighs under the '
@@ -143,11 +163,13 @@ const List<CableExercise> cableExercises = [
       'Bar near the upper chest, shoulder blades pinned down and together.',
       'Return slowly until the arms are straight. Keep tension, no dropping.',
     ],
-    cameraOrbit: '160deg 78deg 118%',
+    cameraOrbit: '135deg 78deg 5.4m',
+    cameraTarget: '0m 1.10m 0.40m',
   ),
   CableExercise(
     name: 'Seated Cable Row',
     animation: 'SeatedCableRow',
+    seated: true,
     primary: ['lats', 'rhomboids', 'traps'],
     secondary: ['rear_delts', 'biceps', 'erectors', 'forearms'],
     setup: 'Clip the tracker on the weight stack. Sit with knees slightly '
@@ -159,7 +181,8 @@ const List<CableExercise> cableExercises = [
       'Squeeze the shoulder blades together, chest up, no shrugging.',
       'Let the arms go long under control. Do not round the lower back.',
     ],
-    cameraOrbit: '150deg 75deg 118%',
+    cameraOrbit: '115deg 78deg 5.6m',
+    cameraTarget: '0m 0.90m 0.80m',
   ),
   CableExercise(
     name: 'Tricep Pushdown',
@@ -175,7 +198,8 @@ const List<CableExercise> cableExercises = [
       'Squeeze the back of the arms hard at the bottom.',
       'Let the handle rise to chest height without the elbows drifting.',
     ],
-    cameraOrbit: '130deg 80deg 112%',
+    cameraOrbit: '120deg 80deg 5.2m',
+    cameraTarget: '0m 1.05m 0.50m',
   ),
   CableExercise(
     name: 'Cable Bicep Curl',
@@ -191,7 +215,8 @@ const List<CableExercise> cableExercises = [
       'Hands near the shoulders, biceps fully tight.',
       'Take about two seconds on the way down.',
     ],
-    cameraOrbit: '25deg 80deg 112%',
+    cameraOrbit: '55deg 80deg 5.2m',
+    cameraTarget: '0m 1.00m 0.50m',
   ),
   CableExercise(
     name: 'Cable Chest Fly',
@@ -207,7 +232,8 @@ const List<CableExercise> cableExercises = [
       'Hands together in front of the chest, squeeze the pecs.',
       'Let the arms open slowly until you feel the stretch again.',
     ],
-    cameraOrbit: '20deg 78deg 118%',
+    cameraOrbit: '25deg 78deg 5.4m',
+    cameraTarget: '0m 1.05m 0.0m',
   ),
   CableExercise(
     name: 'Face Pull',
@@ -223,7 +249,8 @@ const List<CableExercise> cableExercises = [
       'Hands beside the ears, shoulder blades squeezed together.',
       'Return slowly. Do not let the shoulders roll forward.',
     ],
-    cameraOrbit: '145deg 75deg 118%',
+    cameraOrbit: '125deg 76deg 5.4m',
+    cameraTarget: '0m 1.10m 0.75m',
   ),
 ];
 

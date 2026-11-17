@@ -1,0 +1,264 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:model_viewer_plus/model_viewer_plus.dart';
+import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
+
+import '../models/cable_exercise.dart';
+
+/// Drives an [AnatomyViewer]: which exercise is shown, how it plays, and (in
+/// live mode) which point of the repetition the figure is at.
+class AnatomyViewerController {
+  WebViewController? _web;
+  CableExercise? _exercise;
+  bool _live = false;
+  double _progress = 0;
+
+  void _run(String call) {
+    _web?.runJavaScript('if (window.gp) { window.gp.$call; }');
+  }
+
+  static Map<String, Object> _config(CableExercise e) => {
+        'animation': e.animation,
+        'primary': e.primary,
+        'secondary': e.secondary,
+        'orbit': e.cameraOrbit,
+        'target': e.cameraTarget,
+      };
+
+  void showExercise(CableExercise e) {
+    _exercise = e;
+    _run('exercise(${jsonEncode(_config(e))})');
+  }
+
+  void play() => _run('play()');
+  void pause() => _run('pause()');
+  void setSpeed(double v) => _run('speed($v)');
+
+  /// Jump to rep time [t] (0..1) of the guide animation.
+  void seek(double t) => _run('seek($t)');
+
+  void setOrbit(String orbit) => _run('orbit(${jsonEncode(orbit)})');
+  void resetCamera() {
+    final e = _exercise;
+    if (e != null) _run('camera(${jsonEncode(e.cameraOrbit)}, ${jsonEncode(e.cameraTarget)})');
+  }
+
+  /// Show only one muscle group at full strength (null = all).
+  void setFocus(String? group) => _run('focus(${jsonEncode(group)})');
+  void setSkin(bool on) => _run('skin($on)');
+
+  /// Live mode: the clock stops and the figure follows [setProgress].
+  void setLive(bool live) {
+    _live = live;
+    _run('live($live)');
+    if (live) _run('progress($_progress)');
+  }
+
+  /// How far through the working phase the user is: 0 = start position,
+  /// 1 = peak contraction. Only used in live mode.
+  void setProgress(double progress) {
+    _progress = progress.clamp(0.0, 1.0);
+    if (_live) _run('progress(${_progress.toStringAsFixed(3)})');
+  }
+}
+
+/// 3D figure performing a cable exercise, with the working muscles tinted.
+///
+/// The model (`assets/models/anatomy_cable.glb`, built by
+/// tools/build_anatomy_model.py) holds skin over real muscle shapes plus the
+/// machine: seat, handle, cables, pulleys and the weight stack with the
+/// tracker on it. Each exercise is one animation clip.
+class AnatomyViewer extends StatefulWidget {
+  final CableExercise exercise;
+  final AnatomyViewerController controller;
+
+  /// Rep time (0..1) and model-loaded flag, about ten times a second.
+  final void Function(double t, bool ready)? onStatus;
+
+  const AnatomyViewer({
+    super.key,
+    required this.exercise,
+    required this.controller,
+    this.onStatus,
+  });
+
+  static const Color background = Color(0xFF12171A);
+
+  @override
+  State<AnatomyViewer> createState() => _AnatomyViewerState();
+}
+
+class _AnatomyViewerState extends State<AnatomyViewer> {
+  static const String _modelAsset = 'assets/models/anatomy_cable.glb';
+  late final Widget _viewer;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.exercise;
+    widget.controller._exercise = e;
+    // Built once: rebuilding ModelViewer with new arguments would reload the
+    // whole model. Everything after this goes through JavaScript.
+    _viewer = ModelViewer(
+      id: 'gp',
+      src: _modelAsset,
+      alt: 'Figure performing a cable exercise',
+      backgroundColor: AnatomyViewer.background,
+      loading: Loading.eager,
+      autoPlay: true,
+      animationName: e.animation,
+      cameraControls: true,
+      cameraOrbit: e.cameraOrbit,
+      cameraTarget: e.cameraTarget,
+      fieldOfView: '28deg',
+      interactionPrompt: InteractionPrompt.none,
+      touchAction: TouchAction.none,
+      disableTap: true,
+      ar: false,
+      exposure: 1.0,
+      shadowIntensity: 0.7,
+      shadowSoftness: 0.9,
+      debugLogging: false,
+      relatedJs: _script(e),
+      javascriptChannels: {
+        JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
+      },
+      onWebViewCreated: (c) => widget.controller._web = c,
+    );
+  }
+
+  void _onMessage(String raw) {
+    if (!mounted) return;
+    try {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      widget.onStatus?.call((data['t'] as num).toDouble(), data['ready'] == true);
+    } catch (_) {
+      // A malformed message only costs one status update.
+    }
+  }
+
+  /// Page script: tints the muscle materials every frame from the rep time and
+  /// reports that time back. The timeline numbers mirror [RepTimeline].
+  static String _script(CableExercise initial) => '''
+(function () {
+  const mv = document.querySelector('#gp');
+  // Resting muscles: grey under the skin, anatomical red with the skin off.
+  const UNDER_SKIN = [0.42, 0.43, 0.46];
+  const BARE = [0.42, 0.22, 0.20];
+  const SKIN = [0.30, 0.31, 0.35];
+  const SKIN_ALPHA = 0.45;
+  // Materials that are not muscles: clothing and the machine.
+  const FIXED = ['shorts', 'equipment', 'cable', 'tracker', 'pad'];
+  const PRIMARY = [0.0, 1.0, 0.53];
+  const SECONDARY = [1.0, 0.72, 0.20];
+  const PULL = ${RepTimeline.pullStart}, HOLD = ${RepTimeline.holdStart};
+  const RETURN = ${RepTimeline.returnStart}, REST = ${RepTimeline.restStart};
+  let cfg = ${jsonEncode(AnatomyViewerController._config(initial))};
+  let BASE = UNDER_SKIN, skinAlpha = SKIN_ALPHA, skinDirty = true;
+  let focus = null, last = {}, lastSent = 0, paused = false;
+  // Live mode: the figure eases towards the progress the tracker reports.
+  let live = false, target = 0, shown = 0, lastFrame = 0;
+
+  function smooth(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
+  function contraction(t) {
+    if (t < PULL) return 0;
+    if (t < HOLD) return smooth((t - PULL) / (HOLD - PULL));
+    if (t < RETURN) return 1;
+    if (t < REST) return 1 - smooth((t - RETURN) / (REST - RETURN));
+    return 0;
+  }
+  // Rep time on the way up at which the contraction equals c.
+  function timeFor(c) {
+    c = Math.min(1, Math.max(0, c));
+    return PULL + (0.5 - Math.sin(Math.asin(1 - 2 * c) / 3)) * (HOLD - PULL);
+  }
+  function repTime() {
+    const d = mv.duration || 4;
+    return (((mv.currentTime || 0) % d) + d) % d / d;
+  }
+  function paint() {
+    if (!mv.model) return;
+    const c = contraction(repTime());
+    for (const m of mv.model.materials) {
+      const n = m.name;
+      if (n === 'skin') {
+        if (skinDirty) {
+          skinDirty = false;
+          m.pbrMetallicRoughness.setBaseColorFactor([SKIN[0], SKIN[1], SKIN[2], skinAlpha]);
+        }
+        continue;
+      }
+      if (FIXED.indexOf(n) >= 0) continue;
+      let k = 0, tone = PRIMARY;
+      if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
+      else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
+      if (focus) { k = n === focus ? 1 : k * 0.15; }
+      const key = Math.round(k * 40) + (tone === PRIMARY ? 'p' : 's');
+      if (last[n] === key) continue;
+      last[n] = key;
+      m.pbrMetallicRoughness.setBaseColorFactor([
+        BASE[0] + (tone[0] - BASE[0]) * k,
+        BASE[1] + (tone[1] - BASE[1]) * k,
+        BASE[2] + (tone[2] - BASE[2]) * k, 1]);
+      // Glow strongly enough to read through the skin layer.
+      const glow = skinAlpha > 0 ? k : k * 0.3;
+      m.setEmissiveFactor([tone[0] * glow, tone[1] * glow, tone[2] * glow]);
+      if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
+    }
+  }
+  function tick(now) {
+    const dt = Math.min(200, now - lastFrame);
+    lastFrame = now;
+    if (live && mv.model) {
+      // Ease by elapsed time, so slow phones do not lag behind the tracker.
+      shown += (target - shown) * (1 - Math.exp(-dt / 55));
+      if (Math.abs(target - shown) < 0.002) shown = target;
+      mv.currentTime = timeFor(shown) * (mv.duration || 4);
+    }
+    paint();
+    if (now - lastSent > 90 && window.GP) {
+      lastSent = now;
+      GP.postMessage(JSON.stringify({ t: repTime(), ready: !!mv.model }));
+    }
+    requestAnimationFrame(tick);
+  }
+  function resume() { if (live || paused) { mv.pause(); } else { mv.play(); } }
+  mv.addEventListener('load', function () {
+    last = {};
+    skinDirty = true;
+    mv.animationName = cfg.animation;
+    resume();
+  });
+  window.gp = {
+    exercise: function (c) {
+      cfg = c; focus = null; last = {};
+      mv.animationName = c.animation;
+      mv.currentTime = 0;
+      mv.cameraOrbit = c.orbit;
+      mv.cameraTarget = c.target;
+      resume();
+    },
+    play: function () { paused = false; resume(); },
+    pause: function () { paused = true; mv.pause(); },
+    speed: function (s) { mv.timeScale = s; },
+    seek: function (f) { mv.currentTime = f * (mv.duration || 4); },
+    orbit: function (o) { mv.cameraOrbit = o; },
+    camera: function (o, t) { mv.cameraOrbit = o; mv.cameraTarget = t; },
+    focus: function (g) { focus = g; last = {}; },
+    skin: function (on) {
+      skinAlpha = on ? SKIN_ALPHA : 0.0;
+      BASE = on ? UNDER_SKIN : BARE;
+      skinDirty = true;
+      last = {};
+    },
+    live: function (on) { live = on; if (on) { shown = target; } resume(); },
+    progress: function (p) { target = Math.min(1, Math.max(0, p)); }
+  };
+  requestAnimationFrame(tick);
+})();
+''';
+
+  @override
+  Widget build(BuildContext context) => _viewer;
+}
