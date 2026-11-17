@@ -1,0 +1,636 @@
+"""Build the Movement Studio anatomy model (mobile/assets/models/anatomy_cable.glb).
+
+Takes the real muscle and bone shapes of BodyParts3D (one mesh per muscle),
+rigs them to a simple skeleton and bakes one animation per cable exercise.
+Each muscle group becomes its own material, so the app highlights a muscle by
+tinting that muscle's actual geometry -- nothing is painted onto a surface.
+
+    pip install bpy numpy
+    git clone --depth 1 https://github.com/Kevin-Mattheus-Moerman/BodyParts3D
+    python tools/build_anatomy_model.py BodyParts3D/assets/BodyParts3D_data \
+        mobile/assets/models/anatomy_cable.glb [preview_dir]
+
+Data: BodyParts3D, (c) The Database Center for Life Science, licensed under
+CC Attribution-Share Alike 2.1 Japan. The generated .glb is a derivative of
+that data and carries the same licence; the app must show the credit line.
+"""
+import collections
+import math
+import os
+import re
+import sys
+
+import bpy
+import numpy as np
+from mathutils import Matrix, Vector
+
+DATA = sys.argv[1]
+OUT = sys.argv[2]
+PREVIEW_DIR = sys.argv[3] if len(sys.argv) > 3 else None
+CACHE = os.environ.get("ANATOMY_CACHE")
+
+FPS = 30
+REP_SECONDS = 4.0
+# Rep timeline (fractions of one rep): rest, pull, hold, return, rest.
+T_PULL, T_HOLD, T_RETURN, T_REST = 0.10, 0.45, 0.55, 0.92
+
+TARGET_TRIANGLES = 200_000   # whole-model budget after edge-collapse decimation
+
+MUSCLE_COLOR = (0.36, 0.20, 0.19, 1.0)
+BONE_COLOR = (0.80, 0.77, 0.68, 1.0)
+
+# Muscle groups the app can highlight: material name -> name pattern.
+GROUPS = [
+    ("lats", r"latissimus dorsi|teres major"),
+    ("traps", r"trapezius"),
+    ("rhomboids", r"rhomboid"),
+    ("rear_delts", r"spinal part of .* deltoid"),
+    ("side_delts", r"acromial part of .* deltoid"),
+    ("front_delts", r"clavicular part of .* deltoid"),
+    ("rotator_cuff", r"infraspinatus|teres minor|supraspinatus|subscapularis"),
+    ("pecs", r"pectoralis major"),
+    ("biceps", r"biceps brachii|brachialis|coracobrachialis"),
+    ("triceps", r"triceps brachii|anconeus"),
+    ("forearms", r"brachioradialis|carpi|digitorum superficialis|digitorum profundus|"
+                 r"extensor digitorum$|extensor digiti minimi|extensor indicis|pollicis longus|"
+                 r"palmaris|pronator|supinator"),
+    ("abs", r"rectus abdominis|pyramidalis"),
+    ("obliques", r"external oblique|internal oblique"),
+    ("serratus", r"serratus anterior"),
+    ("erectors", r"iliocostalis|longissimus|spinalis|multifidus"),
+    ("glutes", r"gluteus"),
+    ("quads", r"rectus femoris|vastus"),
+    ("hamstrings", r"biceps femoris|semitendinosus|semimembranosus"),
+    ("calves", r"gastrocnemius|soleus"),
+]
+SKIP = r"anal sphincter|levator ani|coccyge|pubo|puborectalis|iliococcygeus"
+
+# Which bones may move a muscle ({s} = l / r). First match wins.
+ARM_TORSO = ("pelvis", "spine_01", "spine_02", "spine_03", "upperarm_{s}")
+RULES = [
+    (r"latissimus dorsi|teres major|pectoralis major", ARM_TORSO + ("clavicle_{s}",), True),
+    (r"pectoralis minor|subclavius|serratus anterior", ("spine_02", "spine_03", "clavicle_{s}"), False),
+    (r"deltoid", ("clavicle_{s}", "upperarm_{s}"), False),
+    (r"infraspinatus|teres minor|supraspinatus|subscapularis", ("clavicle_{s}", "upperarm_{s}"), True),
+    (r"trapezius|rhomboid|levator scapulae", ("spine_02", "spine_03", "neck", "head", "clavicle_{s}"), False),
+    (r"biceps brachii|brachialis|coracobrachialis|triceps brachii|anconeus",
+     ("upperarm_{s}", "lowerarm_{s}"), False),
+    (r"hand|pollicis brevis|opponens pollicis|adductor pollicis|flexor retinaculum",
+     ("lowerarm_{s}", "hand_{s}"), False),
+    (r"brachioradialis|carpi|digitorum superficialis|digitorum profundus|extensor digitorum$|"
+     r"extensor digiti minimi|extensor indicis|pollicis longus|palmaris|pronator|supinator",
+     ("upperarm_{s}", "lowerarm_{s}", "hand_{s}"), False),
+    (r"foot|hallucis brevis|digitorum brevis|flexor accessorius|abductor hallucis",
+     ("calf_{s}", "foot_{s}"), False),
+    (r"gastrocnemius|soleus|plantaris|popliteus|tibialis|fibularis|digitorum longus|"
+     r"hallucis longus|calcaneal", ("thigh_{s}", "calf_{s}", "foot_{s}"), False),
+    (r"gluteus|piriformis|obturator|gemellus|quadratus femoris|psoas|iliacus|tensor fasciae|"
+     r"iliotibial|sartorius|gracilis|adductor|pectineus|rectus femoris|vastus|biceps femoris|"
+     r"semitendinosus|semimembranosus|inguinal",
+     ("pelvis", "spine_01", "thigh_{s}", "calf_{s}"), False),
+    (r"sternocleidomastoid|scalenus|splenius|capitis|cervicis|longus colli|hyoid|thyroid|"
+     r"digastric|platysma|cervical", ("spine_03", "neck", "head"), False),
+    (r"masseter|temporalis|pterygoid|buccinator|oris|oculi|nasi|nasalis|frontalis|occipitalis|"
+     r"zygomaticus|risorius|mentalis|procerus|supercilii|epicranius|temporoparietalis|labii",
+     ("head",), False),
+    (r".", ("pelvis", "spine_01", "spine_02", "spine_03"), False),
+]
+
+# Cable exercises: arm directions (left arm; +X = left, -Y = front, +Z = up)
+# at the start and at the peak of the pull, torso lean (deg, + = forward) and
+# shoulder-blade retraction (deg) at start/peak.
+EXERCISES = {
+    "LatPulldown": dict(
+        upper=((0.45, -0.15, 0.88), (0.78, 0.12, -0.62)),
+        fore=((0.12, -0.10, 0.99), (-0.12, -0.22, 0.97)),
+        lean=(0, -8), retract=(-4, 10)),
+    "SeatedCableRow": dict(
+        upper=((0.12, -0.95, -0.30), (0.28, 0.72, -0.63)),
+        fore=((-0.04, -1.0, -0.06), (-0.04, -0.98, 0.14)),
+        lean=(9, -3), retract=(-8, 14)),
+    "TricepPushdown": dict(
+        upper=((0.10, 0.04, -1.0), (0.10, 0.06, -1.0)),
+        fore=((-0.10, -0.80, 0.58), (0.02, -0.10, -0.99)),
+        lean=(9, 9), retract=(0, 0)),
+    "CableBicepCurl": dict(
+        upper=((0.10, 0.03, -1.0), (0.10, -0.10, -0.99)),
+        fore=((0.06, -0.10, -0.99), (0.02, -0.62, 0.78)),
+        lean=(0, 0), retract=(0, 0)),
+    "CableChestFly": dict(
+        upper=((0.90, 0.22, -0.28), (0.24, -0.90, -0.34)),
+        fore=((0.90, -0.34, -0.12), (-0.36, -0.90, -0.10)),
+        lean=(8, 8), retract=(8, -10)),
+    "FacePull": dict(
+        upper=((0.12, -0.97, 0.16), (0.92, 0.24, 0.12)),
+        fore=((-0.05, -0.99, 0.10), (0.12, -0.45, 0.88)),
+        lean=(0, -4), retract=(-8, 14)),
+}
+
+
+# ----------------------------------------------------------------- data ----
+def read_stl(part):
+    raw = open(os.path.join(DATA, "stl", part + ".stl"), "rb").read()
+    count = int(np.frombuffer(raw[80:84], "<u4")[0])
+    if 84 + count * 50 != len(raw):          # ASCII STL
+        found = re.findall(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)", raw)
+        return np.array(found, dtype=float).reshape(-1, 3, 3) * 0.001
+    rec = np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")])
+    return np.frombuffer(raw[84:], dtype=rec, count=count)["v"].astype(float) * 0.001
+
+
+def weld(tris):
+    """Index a triangle soup: identical corner positions become one vertex."""
+    pts = np.round(tris.reshape(-1, 3), 6)
+    verts, inverse = np.unique(pts, axis=0, return_inverse=True)
+    faces = inverse.reshape(-1, 3)
+    ok = (faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])
+    return verts, faces[ok].astype(np.int32)
+
+
+def decimate(verts, faces, target):
+    """Edge-collapse one part down to about `target` triangles."""
+    if len(faces) <= target:
+        return verts, faces
+    me = bpy.data.meshes.new("tmp")
+    me.from_pydata(verts.tolist(), [], faces.tolist())
+    me.update()
+    ob = bpy.data.objects.new("tmp", me)
+    bpy.context.scene.collection.objects.link(ob)
+    mod = ob.modifiers.new("d", "DECIMATE")
+    mod.ratio = target / len(faces)
+    mod.use_collapse_triangulate = True
+    bpy.context.view_layer.objects.active = ob
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    out = ob.data
+    v = np.zeros(len(out.vertices) * 3)
+    out.vertices.foreach_get("co", v)
+    out.calc_loop_triangles()
+    f = np.zeros(len(out.loop_triangles) * 3, dtype=np.int32)
+    out.loop_triangles.foreach_get("vertices", f)
+    me = out
+    bpy.data.objects.remove(ob)
+    bpy.data.meshes.remove(me)
+    return v.reshape(-1, 3), f.reshape(-1, 3)
+
+
+def load_parts():
+    if CACHE and os.path.exists(CACHE):
+        z = np.load(CACHE, allow_pickle=True)
+        return list(z["parts"])
+    names = dict(line.rstrip("\n").split("\t")
+                 for line in open(os.path.join(DATA, "parts_list_e.txt")).readlines()[1:])
+    children = collections.defaultdict(list)
+    for line in open(os.path.join(DATA, "conventional_part_of.txt")).readlines()[1:]:
+        cols = line.rstrip("\n").split("\t")
+        children[cols[0]].append(cols[2])
+    have = {f[:-4] for f in os.listdir(os.path.join(DATA, "stl"))}
+
+    def leaves(root, acc):
+        if root in have:
+            acc.add(root)
+        for c in children.get(root, []):
+            leaves(c, acc)
+        return acc
+
+    parts = []
+    for kind, root in (("muscle", "FMA72954"), ("bone", "FMA23881")):
+        for pid in sorted(leaves(root, set())):
+            name = names[pid]
+            if re.search(SKIP, name):
+                continue
+            verts, faces = weld(read_stl(pid))
+            if len(faces) < 4:
+                continue
+            parts.append(dict(id=pid, name=name, kind=kind, verts=verts, faces=faces))
+
+    # Share the triangle budget by surface area; muscles the app can highlight
+    # get the most detail, bones (mostly hidden under muscle) the least.
+    def area(p):
+        t = p["verts"][p["faces"]]
+        return 0.5 * np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1).sum()
+
+    def importance(p):
+        if p["kind"] == "bone":
+            return 0.35
+        return 1.0 if any(re.search(pat, p["name"]) for _, pat in GROUPS) else 0.6
+
+    share = np.array([area(p) * importance(p) for p in parts])
+    budget = np.maximum(24, TARGET_TRIANGLES * share / share.sum())
+    for p, tris in zip(parts, budget):
+        p["verts"], p["faces"] = decimate(p["verts"], p["faces"], int(tris))
+    if CACHE:
+        np.savez_compressed(CACHE, parts=np.array(parts, dtype=object))
+    return parts
+
+
+def side_of(name):
+    if re.search(r"\bleft\b", name):
+        return "l"
+    if re.search(r"\bright\b", name):
+        return "r"
+    return ""
+
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+parts = load_parts()
+ground = min(p["verts"][:, 2].min() for p in parts)
+for p in parts:
+    p["verts"][:, 2] -= ground
+by_name = {p["name"]: p for p in parts}
+print(len(parts), "parts,", sum(len(p["faces"]) for p in parts), "triangles")
+
+
+# ------------------------------------------------------------- skeleton ----
+def slab(name, lo, hi):
+    """Centroid of the part's vertices between two height fractions."""
+    v = by_name[name]["verts"]
+    z0, z1 = v[:, 2].min(), v[:, 2].max()
+    sel = v[(v[:, 2] >= z0 + lo * (z1 - z0)) & (v[:, 2] <= z0 + hi * (z1 - z0))]
+    return sel.mean(axis=0)
+
+
+def centroid(name):
+    return by_name[name]["verts"].mean(axis=0)
+
+
+J = {}
+for s, word in (("l", "left"), ("r", "right")):
+    J[f"shoulder_{s}"] = slab(f"{word} humerus", 0.90, 1.0)
+    J[f"elbow_{s}"] = slab(f"{word} humerus", 0.0, 0.05)
+    wrist_r, wrist_u = slab(f"{word} radius", 0.0, 0.05), slab(f"{word} ulna", 0.0, 0.05)
+    J[f"wrist_{s}"] = (wrist_r + wrist_u) / 2
+    femur = by_name[f"{word} femur"]["verts"]
+    top = femur[femur[:, 2] > femur[:, 2].max() - 0.05]
+    inner = top[np.argsort(np.abs(top[:, 0]))[: max(8, len(top) // 3)]]
+    J[f"hip_{s}"] = inner.mean(axis=0)
+    J[f"knee_{s}"] = slab(f"{word} femur", 0.0, 0.05)
+    J[f"ankle_{s}"] = slab(f"{word} tibia", 0.0, 0.04)
+    clav = by_name[f"{word} clavicle"]["verts"]
+    J[f"sternal_{s}"] = clav[np.argsort(np.abs(clav[:, 0]))[: max(8, len(clav) // 12)]].mean(axis=0)
+    scap = by_name[f"{word} scapula"]["verts"]
+    J[f"scap_{s}"] = scap.mean(axis=0)
+    J[f"scap_low_{s}"] = scap[np.argsort(scap[:, 2])[: max(8, len(scap) // 20)]].mean(axis=0)
+
+hand_bones = {"l": [], "r": []}
+foot_bones = {"l": [], "r": []}
+for p in parts:
+    if p["kind"] != "bone":
+        continue
+    c = p["verts"].mean(axis=0)
+    s = "l" if c[0] > 0 else "r"
+    if c[2] < J[f"wrist_{s}"][2] + 0.005 and np.linalg.norm(c - J[f"wrist_{s}"]) < 0.24 \
+            and abs(c[0]) > abs(J[f"hip_{s}"][0]) + 0.06:
+        hand_bones[s].append(p)
+    if c[2] < J[f"ankle_{s}"][2] + 0.01:
+        foot_bones[s].append(p)
+for s in "lr":
+    hv = np.concatenate([p["verts"] for p in hand_bones[s]])
+    J[f"handtip_{s}"] = hv[np.argsort(hv[:, 2])[: len(hv) // 10]].mean(axis=0)
+    fv = np.concatenate([p["verts"] for p in foot_bones[s]])
+    J[f"toe_{s}"] = fv[np.argsort(fv[:, 1])[: len(fv) // 12]].mean(axis=0)
+    J[f"heel_{s}"] = fv[np.argsort(-fv[:, 1])[: len(fv) // 12]].mean(axis=0)
+
+mid_hip = (J["hip_l"] + J["hip_r"]) / 2
+L4 = centroid("fourth lumbar vertebra")
+T11 = centroid("eleventh thoracic vertebra")
+T6 = centroid("sixth thoracic vertebra")
+C7 = centroid("seventh cervical vertebra")
+C1 = centroid("atlas")
+for v in (L4, T11, T6, C7, C1):
+    v[0] = 0.0
+mid_hip[0] = 0.0
+head_top = C1 + np.array([0, -0.02, 0.19])
+
+# name -> (head, tail, parent)
+BONES = collections.OrderedDict([
+    ("pelvis", (mid_hip, L4, None)),
+    ("spine_01", (L4, T11, "pelvis")),
+    ("spine_02", (T11, T6, "spine_01")),
+    ("spine_03", (T6, C7, "spine_02")),
+    ("neck", (C7, C1, "spine_03")),
+    ("head", (C1, head_top, "neck")),
+])
+for s in "lr":
+    BONES[f"clavicle_{s}"] = (J[f"sternal_{s}"], J[f"shoulder_{s}"], "spine_03")
+    BONES[f"upperarm_{s}"] = (J[f"shoulder_{s}"], J[f"elbow_{s}"], f"clavicle_{s}")
+    BONES[f"lowerarm_{s}"] = (J[f"elbow_{s}"], J[f"wrist_{s}"], f"upperarm_{s}")
+    BONES[f"hand_{s}"] = (J[f"wrist_{s}"], J[f"handtip_{s}"], f"lowerarm_{s}")
+    BONES[f"thigh_{s}"] = (J[f"hip_{s}"], J[f"knee_{s}"], "pelvis")
+    BONES[f"calf_{s}"] = (J[f"knee_{s}"], J[f"ankle_{s}"], f"thigh_{s}")
+    BONES[f"foot_{s}"] = (J[f"ankle_{s}"], J[f"toe_{s}"], f"calf_{s}")
+BONE_NAMES = list(BONES)
+
+
+def box(a, b, half_width, front):
+    """Proxy lines for a torso segment: its axis, both flanks and the front wall."""
+    a, b = np.array(a), np.array(b)
+    w, f = np.array([half_width, 0, 0]), np.array([0, -front, 0])
+    return [(a, b), (a + w, b + w), (a - w, b - w), (a + f, b + f),
+            (a + w * 0.7 + f * 0.7, b + w * 0.7 + f * 0.7),
+            (a - w * 0.7 + f * 0.7, b - w * 0.7 + f * 0.7)]
+
+
+# Lines used to measure "how close is this vertex to that bone".
+PROXY = {
+    "pelvis": box(mid_hip, L4, 0.13, 0.10) + [(J["hip_l"], J["hip_r"])],
+    "spine_01": box(L4, T11, 0.125, 0.13),
+    "spine_02": box(T11, T6, 0.135, 0.17),
+    "spine_03": box(T6, C7, 0.12, 0.15),
+    "neck": [(C7, C1)],
+    "head": [(C1, head_top), (C1 + np.array([0, -0.08, 0.02]), head_top + np.array([0, -0.06, -0.06]))],
+}
+for s in "lr":
+    PROXY[f"clavicle_{s}"] = [(J[f"sternal_{s}"], J[f"shoulder_{s}"]),
+                              (J[f"scap_{s}"], J[f"shoulder_{s}"]),
+                              (J[f"scap_{s}"], J[f"scap_low_{s}"])]
+    PROXY[f"upperarm_{s}"] = [(J[f"shoulder_{s}"], J[f"elbow_{s}"])]
+    PROXY[f"lowerarm_{s}"] = [(J[f"elbow_{s}"], J[f"wrist_{s}"])]
+    PROXY[f"hand_{s}"] = [(J[f"wrist_{s}"], J[f"handtip_{s}"])]
+    PROXY[f"thigh_{s}"] = [(J[f"hip_{s}"], J[f"knee_{s}"])]
+    PROXY[f"calf_{s}"] = [(J[f"knee_{s}"], J[f"ankle_{s}"])]
+    PROXY[f"foot_{s}"] = [(J[f"ankle_{s}"], J[f"toe_{s}"]), (J[f"ankle_{s}"], J[f"heel_{s}"])]
+
+
+def distance_to(bone, pts):
+    best = np.full(len(pts), 1e9)
+    for a, b in PROXY[bone]:
+        ab = b - a
+        t = np.clip(((pts - a) @ ab) / max(ab @ ab, 1e-12), 0, 1)
+        best = np.minimum(best, np.linalg.norm(pts - (a + t[:, None] * ab), axis=1))
+    return best
+
+
+def skin_weights(part):
+    """(n, n_bones) weight matrix for one part."""
+    pts = part["verts"]
+    w = np.zeros((len(pts), len(BONE_NAMES)))
+    s = side_of(part["name"]) or ("l" if pts[:, 0].mean() > 0 else "r")
+    if part["kind"] == "bone":
+        name = part["name"]
+        if re.search(r"scapula|clavicle", name):
+            bone = f"clavicle_{s}"
+        else:
+            c = pts.mean(axis=0)[None, :]
+            bone = min(BONE_NAMES, key=lambda b: distance_to(b, c)[0])
+        w[:, BONE_NAMES.index(bone)] = 1
+        return w
+    for pattern, bones, arm_needs_height in RULES:
+        if re.search(pattern, part["name"]):
+            break
+    sides = [side_of(part["name"])] if side_of(part["name"]) else ["l", "r"]
+    allowed = []
+    for b in bones:
+        for sd in (sides if "{s}" in b else [""]):
+            nm = b.format(s=sd)
+            if nm not in allowed:
+                allowed.append(nm)
+    dist = np.stack([distance_to(b, pts) for b in allowed], axis=1)
+    if arm_needs_height:
+        # Only the tendon end near the shoulder may follow the arm.
+        for k, b in enumerate(allowed):
+            if b.startswith("upperarm"):
+                low = pts[:, 2] < J[f"shoulder_{b[-1]}"][2] - 0.085
+                dist[low, k] = 1e9
+    soft = np.exp(-(dist - dist.min(axis=1, keepdims=True)) / 0.022)
+    soft /= soft.sum(axis=1, keepdims=True)
+    for k, b in enumerate(allowed):
+        w[:, BONE_NAMES.index(b)] = soft[:, k]
+    return w
+
+
+def group_of(part):
+    if part["kind"] == "bone":
+        return "bone"
+    for group, pattern in GROUPS:
+        if re.search(pattern, part["name"]):
+            return group
+    return "other_muscle"
+
+
+# ---------------------------------------------------------------- build ----
+scene = bpy.context.scene
+scene.render.fps = FPS
+
+material_names = [g for g, _ in GROUPS] + ["other_muscle", "bone"]
+all_verts, all_faces, all_mats, all_w = [], [], [], []
+offset = 0
+for p in parts:
+    all_verts.append(p["verts"])
+    all_faces.append(p["faces"] + offset)
+    all_mats.append(np.full(len(p["faces"]), material_names.index(group_of(p))))
+    all_w.append(skin_weights(p))
+    offset += len(p["verts"])
+V = np.concatenate(all_verts)
+F = np.concatenate(all_faces)
+MAT = np.concatenate(all_mats)
+W = np.concatenate(all_w)
+
+mesh = bpy.data.meshes.new("Anatomy")
+mesh.vertices.add(len(V))
+mesh.vertices.foreach_set("co", V.astype(np.float32).ravel())
+mesh.loops.add(len(F) * 3)
+mesh.loops.foreach_set("vertex_index", F.astype(np.int32).ravel())
+mesh.polygons.add(len(F))
+mesh.polygons.foreach_set("loop_start", np.arange(0, len(F) * 3, 3, dtype=np.int32))
+mesh.polygons.foreach_set("loop_total", np.full(len(F), 3, dtype=np.int32))
+mesh.polygons.foreach_set("material_index", MAT.astype(np.int32))
+mesh.polygons.foreach_set("use_smooth", np.ones(len(F), dtype=bool))
+mesh.update(calc_edges=True)
+mesh.validate()
+
+for name in material_names:
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    bsdf = m.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = BONE_COLOR if name == "bone" else MUSCLE_COLOR
+    bsdf.inputs["Roughness"].default_value = 0.55
+    bsdf.inputs["Metallic"].default_value = 0.0
+    mesh.materials.append(m)
+
+body = bpy.data.objects.new("Anatomy", mesh)
+scene.collection.objects.link(body)
+
+arm_data = bpy.data.armatures.new("Rig")
+arm = bpy.data.objects.new("Rig", arm_data)
+scene.collection.objects.link(arm)
+bpy.context.view_layer.objects.active = arm
+bpy.ops.object.mode_set(mode="EDIT")
+for name, (head, tail, parent) in BONES.items():
+    eb = arm_data.edit_bones.new(name)
+    eb.head, eb.tail = Vector(head), Vector(tail)
+for name, (head, tail, parent) in BONES.items():
+    if parent:
+        arm_data.edit_bones[name].parent = arm_data.edit_bones[parent]
+bpy.ops.object.mode_set(mode="OBJECT")
+
+for k, name in enumerate(BONE_NAMES):
+    vg = body.vertex_groups.new(name=name)
+    col = W[:, k]
+    for i in np.nonzero(col > 0.01)[0]:
+        vg.add([int(i)], float(col[i]), "REPLACE")
+
+body.parent = arm
+body.modifiers.new("Armature", "ARMATURE").object = arm
+
+# ------------------------------------------------------------ animation ----
+REST = {b.name: b.matrix_local.copy() for b in arm_data.bones}
+ORDER = []
+
+
+def visit(b):
+    ORDER.append(b.name)
+    for child in b.children:
+        visit(child)
+
+
+for b in arm_data.bones:
+    if b.parent is None:
+        visit(b)
+PARENT = {b.name: (b.parent.name if b.parent else None) for b in arm_data.bones}
+
+
+def smooth(t):
+    t = min(1.0, max(0.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def contraction(t):
+    if t < T_PULL:
+        return 0.0
+    if t < T_HOLD:
+        return smooth((t - T_PULL) / (T_HOLD - T_PULL))
+    if t < T_RETURN:
+        return 1.0
+    if t < T_REST:
+        return 1 - smooth((t - T_RETURN) / (T_REST - T_RETURN))
+    return 0.0
+
+
+def slerp(a, b, t):
+    a, b = Vector(a).normalized(), Vector(b).normalized()
+    return a.slerp(b, t).normalized()
+
+
+def lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def solve_pose(ex, c):
+    pose = {}
+    lean = math.radians(lerp(ex["lean"][0], ex["lean"][1], c))
+    retract = math.radians(lerp(ex["retract"][0], ex["retract"][1], c))
+    aims = {}
+    for s, sx in (("l", 1.0), ("r", -1.0)):
+        for bone, key in ((f"upperarm_{s}", "upper"), (f"lowerarm_{s}", "fore")):
+            d = slerp(ex[key][0], ex[key][1], c)
+            aims[bone] = Vector((d.x * sx, d.y, d.z))
+        aims[f"hand_{s}"] = aims[f"lowerarm_{s}"]
+    for name in ORDER:
+        parent = PARENT[name]
+        base = REST[name].copy() if parent is None else \
+            pose[parent] @ REST[parent].inverted() @ REST[name]
+        m = base
+        here = Matrix.Translation(base.to_translation())
+        if name in ("spine_01", "spine_02", "spine_03"):
+            # Lean from the lower back; + = forward (towards -Y).
+            m = here @ Matrix.Rotation(lean / 3, 4, "X") @ base.to_3x3().to_4x4()
+        elif name.startswith("clavicle"):
+            # Shoulder blades squeeze back around the vertical axis.
+            sx = 1.0 if name.endswith("l") else -1.0
+            m = here @ Matrix.Rotation(-sx * retract, 4, "Z") @ base.to_3x3().to_4x4()
+        elif name in aims:
+            current = (base.to_3x3() @ Vector((0, 1, 0))).normalized()
+            swing = current.rotation_difference(aims[name]).to_matrix()
+            m = here @ (swing @ base.to_3x3()).to_4x4()
+        pose[name] = m
+    return pose
+
+
+def key_pose(pose, frame, last):
+    for name in ORDER:
+        parent = PARENT[name]
+        base = REST[name] if parent is None else pose[parent] @ REST[parent].inverted() @ REST[name]
+        q = (base.inverted() @ pose[name]).to_quaternion()
+        if name in last and last[name].dot(q) < 0:
+            q.negate()
+        last[name] = q.copy()
+        pb = arm.pose.bones[name]
+        pb.rotation_quaternion = q
+        pb.keyframe_insert("rotation_quaternion", frame=frame)
+
+
+frames = int(round(REP_SECONDS * FPS))
+scene.frame_start, scene.frame_end = 0, frames
+arm.animation_data_create()
+actions = {}
+for ex_name, ex in EXERCISES.items():
+    action = bpy.data.actions.new(ex_name)
+    arm.animation_data.action = action
+    last = {}
+    for f in range(0, frames + 1, 2):
+        key_pose(solve_pose(ex, contraction(f / frames)), f, last)
+    actions[ex_name] = action
+slot = arm.animation_data.action_slot if hasattr(arm.animation_data, "action_slot") else None
+arm.animation_data.action = None
+for ex_name, action in actions.items():
+    track = arm.animation_data.nla_tracks.new()
+    track.name = ex_name
+    strip = track.strips.new(ex_name, 0, action)
+    strip.name = ex_name
+    if slot is not None and hasattr(strip, "action_slot") and action.slots:
+        strip.action_slot = action.slots[0]
+    track.mute = True
+
+# --------------------------------------------------------------- export ----
+os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
+bpy.ops.object.select_all(action="SELECT")
+bpy.ops.export_scene.gltf(
+    filepath=OUT,
+    export_format="GLB",
+    export_yup=True,
+    export_animations=True,
+    export_animation_mode="NLA_TRACKS",
+    export_skins=True,
+    export_morph=False,
+    export_cameras=False,
+    export_lights=False,
+)
+print("wrote", OUT, round(os.path.getsize(OUT) / 1e6, 2), "MB;",
+      len(mesh.vertices), "vertices,", len(mesh.polygons), "triangles")
+
+# -------------------------------------------------------------- preview ----
+if PREVIEW_DIR:
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    tint = os.environ.get("PREVIEW_TINT", "")
+    for name in tint.split(","):
+        if name in bpy.data.materials:
+            node = bpy.data.materials[name].node_tree.nodes["Principled BSDF"]
+            node.inputs["Base Color"].default_value = (0.0, 0.9, 0.45, 1.0)
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 12
+    scene.cycles.device = "CPU"
+    scene.render.resolution_x, scene.render.resolution_y = 480, 560
+    world = bpy.data.worlds.new("W")
+    world.use_nodes = True
+    world.node_tree.nodes["Background"].inputs[0].default_value = (0.22, 0.24, 0.27, 1)
+    scene.world = world
+    sun = bpy.data.objects.new("Sun", bpy.data.lights.new("Sun", "SUN"))
+    sun.data.energy = 3.5
+    sun.rotation_euler = (math.radians(50), 0, math.radians(-35))
+    scene.collection.objects.link(sun)
+    cam = bpy.data.objects.new("Cam", bpy.data.cameras.new("Cam"))
+    cam.data.lens = float(os.environ.get("PREVIEW_LENS", "70"))
+    scene.collection.objects.link(cam)
+    scene.camera = cam
+    target = Vector((0, 0.0, float(os.environ.get("PREVIEW_Z", "0.95"))))
+    shots = os.environ.get("PREVIEW_SHOTS", "LatPulldown:0:0.5,LatPulldown:180:0.5").split(",")
+    for shot in shots:
+        ex_name, yaw, t = shot.split(":")
+        for track in arm.animation_data.nla_tracks:
+            track.mute = track.name != ex_name
+        a = math.radians(float(yaw))
+        cam.location = target + Vector((math.sin(a) * 4.6, -math.cos(a) * 4.6, 0.35))
+        cam.rotation_euler = (target - cam.location).to_track_quat("-Z", "Y").to_euler()
+        scene.frame_set(int(round(float(t) * frames)))
+        scene.render.filepath = os.path.join(PREVIEW_DIR, f"{ex_name}_{yaw}_{t}.png")
+        bpy.ops.render.render(write_still=True)

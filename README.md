@@ -16,7 +16,7 @@ plots position (cm) against time and counts reps.
 | Mobile app | Flutter (Android; iOS planned) | `mobile/` |
 | Backend | FastAPI + SQLite, JWT auth (local, not yet wired to the app) | `backend/` |
 | Website | Static site on GitHub Pages — https://tutu-cjay.github.io/ (separate repo) | `website/` |
-| Tools | USB test bridge, firmware release script, IMU debug viewer | `tools/` |
+| Tools | USB test bridge, firmware release script, IMU debug viewer, 3D anatomy model builder | `tools/` |
 
 ## Quick start
 
@@ -75,4 +75,6 @@ Details: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
 ## License
 
-Proprietary
+Proprietary, except `mobile/assets/models/anatomy_cable.glb`: derived from
+BodyParts3D, © The Database Center for Life Science, licensed under
+CC Attribution-Share Alike 2.1 Japan (rebuild with `tools/build_anatomy_model.py`).

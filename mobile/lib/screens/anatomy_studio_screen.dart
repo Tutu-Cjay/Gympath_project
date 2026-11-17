@@ -1,169 +1,229 @@
-import 'dart:math' as math;
-import 'dart:ui' as ui;
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import '../models/squat_rig.dart';
+import 'package:model_viewer_plus/model_viewer_plus.dart';
+import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
+
+import '../models/cable_exercise.dart';
 import '../theme/app_theme.dart';
 
-/// Movement Studio: a rotatable 3D squat guide.
+/// Movement Studio: 3D muscle guide for the cable-machine workouts.
 ///
-/// The figure is a procedural athletic body (see [SquatRig]) drawn with a
-/// perspective camera: drag to orbit, pinch to zoom, double-tap to reset.
-/// Muscle highlights and coach cues follow the repetition timeline.
-/// A licensed skinned mesh and pose-pipeline animation data replace the
-/// procedural rig in a later step.
+/// Shows a rigged anatomy model (real muscle shapes from BodyParts3D, see
+/// tools/build_anatomy_model.py) performing the selected exercise. The
+/// muscles that exercise trains are tinted on the model itself: green for
+/// prime movers, amber for assisting muscles, brighter as they contract.
 class AnatomyStudioScreen extends StatefulWidget {
-  const AnatomyStudioScreen({super.key});
+  /// Workout to open on (a name from the workout list). Defaults to the first.
+  final String? initialExercise;
+  const AnatomyStudioScreen({super.key, this.initialExercise});
+
   @override
   State<AnatomyStudioScreen> createState() => _AnatomyStudioScreenState();
 }
 
-class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
-    with TickerProviderStateMixin {
-  static const int _repMs = 4200;
-  static const double _homeYaw = 0.62;
-  static const double _homePitch = 0.20;
+class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
+  static const Color _secondaryColor = Color(0xFFFFB833);
+  static const String _modelAsset = 'assets/models/anatomy_cable.glb';
 
-  late final AnimationController _rep;
-  late final AnimationController _cam;
+  late CableExercise _exercise;
+  late final Widget _viewer;
+  WebViewController? _web;
 
+  bool _ready = false;
   bool _playing = true;
-  bool _resumeAfterScrub = false;
   double _speed = 1.0;
-  MuscleGroup? _focus;
-
-  double _yaw = _homeYaw;
-  double _pitch = _homePitch;
-  double _zoom = 1.0;
-  double _zoomAtPinchStart = 1.0;
-  double _yawFrom = 0, _yawTo = 0;
-  double _pitchFrom = 0, _pitchTo = 0;
-  double _zoomFrom = 1, _zoomTo = 1;
+  double _t = 0;
+  String? _focus;
 
   @override
   void initState() {
     super.initState();
-    _rep = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: _repMs),
-    )..addListener(_onFrame);
-    _cam = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 420),
-    )..addListener(_onCamera);
-    _rep.repeat();
+    _exercise = cableExerciseByName(widget.initialExercise ?? '') ??
+        cableExercises.first;
+    // Built once: rebuilding the widget with new arguments would reload the
+    // whole model. Everything after this goes through JavaScript.
+    _viewer = ModelViewer(
+      id: 'gp',
+      src: _modelAsset,
+      alt: 'Anatomy model performing a cable exercise',
+      backgroundColor: const Color(0xFF12171A),
+      loading: Loading.eager,
+      autoPlay: true,
+      animationName: _exercise.animation,
+      cameraControls: true,
+      cameraOrbit: _exercise.cameraOrbit,
+      fieldOfView: '28deg',
+      interactionPrompt: InteractionPrompt.none,
+      touchAction: TouchAction.none,
+      disableTap: true,
+      ar: false,
+      exposure: 1.15,
+      shadowIntensity: 0.7,
+      shadowSoftness: 0.9,
+      debugLogging: false,
+      relatedJs: _script(_exercise),
+      javascriptChannels: {
+        JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
+      },
+      onWebViewCreated: (c) => _web = c,
+    );
   }
 
-  @override
-  void dispose() {
-    _rep.dispose();
-    _cam.dispose();
-    super.dispose();
+  static Map<String, Object> _config(CableExercise e) => {
+        'animation': e.animation,
+        'primary': e.primary,
+        'secondary': e.secondary,
+        'orbit': e.cameraOrbit,
+      };
+
+  /// Page script: tints the muscle materials every frame from the rep time and
+  /// reports that time back. The timeline numbers mirror [RepTimeline].
+  static String _script(CableExercise initial) => '''
+(function () {
+  const mv = document.querySelector('#gp');
+  const BASE = [0.36, 0.20, 0.19];
+  const PRIMARY = [0.0, 1.0, 0.53];
+  const SECONDARY = [1.0, 0.72, 0.20];
+  let cfg = ${jsonEncode(_config(initial))};
+  let focus = null, last = {}, lastSent = 0, paused = false;
+
+  function smooth(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
+  function contraction(t) {
+    if (t < ${RepTimeline.pullStart}) return 0;
+    if (t < ${RepTimeline.holdStart}) return smooth((t - ${RepTimeline.pullStart}) / ${RepTimeline.holdStart - RepTimeline.pullStart});
+    if (t < ${RepTimeline.returnStart}) return 1;
+    if (t < ${RepTimeline.restStart}) return 1 - smooth((t - ${RepTimeline.returnStart}) / ${RepTimeline.restStart - RepTimeline.returnStart});
+    return 0;
+  }
+  function repTime() {
+    const d = mv.duration || 4;
+    return (((mv.currentTime || 0) % d) + d) % d / d;
+  }
+  function paint() {
+    if (!mv.model) return;
+    const c = contraction(repTime());
+    for (const m of mv.model.materials) {
+      const n = m.name;
+      if (n === 'bone') continue;
+      let k = 0, tone = PRIMARY;
+      if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
+      else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
+      if (focus) { k = n === focus ? 1 : k * 0.15; }
+      const key = Math.round(k * 40) + (tone === PRIMARY ? 'p' : 's');
+      if (last[n] === key) continue;
+      last[n] = key;
+      m.pbrMetallicRoughness.setBaseColorFactor([
+        BASE[0] + (tone[0] - BASE[0]) * k,
+        BASE[1] + (tone[1] - BASE[1]) * k,
+        BASE[2] + (tone[2] - BASE[2]) * k, 1]);
+      m.setEmissiveFactor([tone[0] * k * 0.16, tone[1] * k * 0.16, tone[2] * k * 0.16]);
+    }
+  }
+  function tick(now) {
+    paint();
+    if (now - lastSent > 90 && window.GP) {
+      lastSent = now;
+      GP.postMessage(JSON.stringify({ t: repTime(), ready: !!mv.model }));
+    }
+    requestAnimationFrame(tick);
+  }
+  mv.addEventListener('load', function () {
+    last = {};
+    mv.animationName = cfg.animation;
+    if (!paused) mv.play();
+  });
+  window.gp = {
+    exercise: function (c) {
+      cfg = c; focus = null; last = {};
+      mv.animationName = c.animation;
+      mv.currentTime = 0;
+      mv.cameraOrbit = c.orbit;
+      if (!paused) mv.play();
+    },
+    play: function () { paused = false; mv.play(); },
+    pause: function () { paused = true; mv.pause(); },
+    speed: function (s) { mv.timeScale = s; },
+    seek: function (f) { mv.currentTime = f * (mv.duration || 4); },
+    orbit: function (o) { mv.cameraOrbit = o; },
+    focus: function (g) { focus = g; last = {}; }
+  };
+  requestAnimationFrame(tick);
+})();
+''';
+
+  void _js(String call) {
+    _web?.runJavaScript('if (window.gp) { window.gp.$call; }');
   }
 
-  void _onFrame() => setState(() {});
+  void _onMessage(String raw) {
+    if (!mounted) return;
+    try {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final t = (data['t'] as num).toDouble();
+      final ready = data['ready'] == true;
+      if ((t - _t).abs() > 0.004 || ready != _ready) {
+        setState(() {
+          _t = t;
+          _ready = ready;
+        });
+      }
+    } catch (_) {
+      // A malformed message only costs one UI update.
+    }
+  }
 
-  void _onCamera() {
-    final t = Curves.easeInOut.transform(_cam.value);
+  void _select(CableExercise e) {
+    if (e == _exercise) return;
     setState(() {
-      _yaw = _yawFrom + (_yawTo - _yawFrom) * t;
-      _pitch = _pitchFrom + (_pitchTo - _pitchFrom) * t;
-      _zoom = _zoomFrom + (_zoomTo - _zoomFrom) * t;
+      _exercise = e;
+      _focus = null;
+      _t = 0;
     });
-  }
-
-  static double _wrapAngle(double a) =>
-      a - 2 * math.pi * ((a + math.pi) / (2 * math.pi)).floorToDouble();
-
-  /// Sweeps the camera to a preset view along the shortest rotation.
-  void _goTo(double yaw, double pitch) {
-    _cam.stop();
-    _yawFrom = _yaw;
-    _yawTo = _yaw + _wrapAngle(yaw - _yaw);
-    _pitchFrom = _pitch;
-    _pitchTo = pitch;
-    _zoomFrom = _zoom;
-    _zoomTo = 1.0;
-    _cam.forward(from: 0);
+    _js('exercise(${jsonEncode(_config(e))})');
   }
 
   void _togglePlayback() {
     setState(() => _playing = !_playing);
-    if (_playing) {
-      _rep.repeat();
-    } else {
-      _rep.stop();
-    }
+    _js(_playing ? 'play()' : 'pause()');
   }
 
   void _setSpeed(double v) {
     setState(() => _speed = v);
-    _rep.duration = Duration(milliseconds: (_repMs / v).round());
-    if (_playing) _rep.repeat();
+    _js('speed($v)');
+  }
+
+  void _setFocus(String group) {
+    setState(() => _focus = _focus == group ? null : group);
+    _js('focus(${jsonEncode(_focus)})');
   }
 
   @override
   Widget build(BuildContext context) {
-    final t = _rep.value;
-    final depth = SquatRig.depthAt(t);
-    final phase = SquatRig.phaseAt(t);
-    final pose = SquatRig.solve(depth);
-
+    final phase = RepTimeline.phaseAt(_t);
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
-      appBar: AppBar(
-        title: const Text('Movement Studio'),
-        actions: [
-          IconButton(
-            tooltip: 'Reset view',
-            onPressed: () => _goTo(_homeYaw, _homePitch),
-            icon: const Icon(Icons.center_focus_strong_rounded),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Movement Studio')),
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, box) {
-            final viewH = (box.maxHeight * 0.46).clamp(230.0, 520.0);
+            final viewH = (box.maxHeight * 0.44).clamp(220.0, 520.0);
             return Column(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 4, 18, 10),
-                  child: Row(children: [
-                    Container(
-                      width: 7,
-                      height: 7,
-                      decoration: const BoxDecoration(
-                          color: AppTheme.neonGreen, shape: BoxShape.circle),
-                    ),
-                    const SizedBox(width: 8),
-                    const Text('EXERCISE GUIDE  /  SQUAT',
-                        style: TextStyle(
-                            color: AppTheme.neonGreen,
-                            fontSize: 11,
-                            letterSpacing: 1.4,
-                            fontWeight: FontWeight.w700)),
-                    const Spacer(),
-                    const Text('3D PROTOTYPE',
-                        style:
-                            TextStyle(color: AppTheme.textMuted, fontSize: 10)),
-                  ]),
-                ),
+                _buildExerciseBar(),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 18),
-                  child: SizedBox(
-                    height: viewH,
-                    child: _buildViewport(pose, phase),
-                  ),
+                  child: SizedBox(height: viewH, child: _buildViewport()),
                 ),
-                _buildTimeline(t, depth, phase),
+                _buildTimeline(phase),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
+                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
                   child: _buildControls(),
                 ),
                 Expanded(
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(18, 6, 18, 24),
-                    children: _buildDetails(depth, phase),
+                    children: _buildDetails(phase),
                   ),
                 ),
               ],
@@ -174,59 +234,83 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
     );
   }
 
-  Widget _buildViewport(SquatPose pose, SquatPhase phase) {
+  Widget _buildExerciseBar() {
+    return SizedBox(
+      height: 46,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(18, 2, 18, 10),
+        itemCount: cableExercises.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          final e = cableExercises[i];
+          final selected = e == _exercise;
+          return GestureDetector(
+            onTap: () => _select(e),
+            child: Container(
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: selected ? AppTheme.neonGreen : AppTheme.cardBg,
+                borderRadius: BorderRadius.circular(17),
+                border: Border.all(
+                    color:
+                        selected ? AppTheme.neonGreen : AppTheme.cardBgLight),
+              ),
+              child: Text(e.name,
+                  style: TextStyle(
+                      color: selected ? Colors.black : AppTheme.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600)),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildViewport() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: Container(
         decoration: BoxDecoration(
-          gradient: const RadialGradient(
-            center: Alignment(0, -0.2),
-            radius: 1.1,
-            colors: [Color(0xFF1D2527), Color(0xFF101415)],
-          ),
+          color: const Color(0xFF12171A),
           borderRadius: BorderRadius.circular(22),
           border: Border.all(color: AppTheme.cardBgLight),
         ),
         child: Stack(children: [
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onDoubleTap: () => _goTo(_homeYaw, _homePitch),
-              onScaleStart: (_) {
-                _cam.stop();
-                _zoomAtPinchStart = _zoom;
-              },
-              onScaleUpdate: (d) {
-                setState(() {
-                  if (d.pointerCount > 1) {
-                    _zoom = (_zoomAtPinchStart * d.scale).clamp(0.7, 2.4);
-                  } else {
-                    _yaw += d.focalPointDelta.dx * 0.011;
-                    _pitch = (_pitch + d.focalPointDelta.dy * 0.006)
-                        .clamp(-0.12, 1.15);
-                  }
-                });
-              },
-              child: CustomPaint(
-                painter: _RigPainter(
-                  pose: pose,
-                  phase: phase,
-                  yaw: _yaw,
-                  pitch: _pitch,
-                  zoom: _zoom,
-                  focus: _focus,
+          Positioned.fill(child: _viewer),
+          if (!_ready)
+            const Positioned.fill(
+              child: ColoredBox(
+                color: Color(0xFF12171A),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 26,
+                        height: 26,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2.5, color: AppTheme.neonGreen),
+                      ),
+                      SizedBox(height: 12),
+                      Text('Loading 3D model…',
+                          style: TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
           Positioned(
             left: 12,
             top: 12,
             child: Row(children: [
-              _viewChip('FRONT', () => _goTo(0, 0.10)),
-              _viewChip('SIDE', () => _goTo(math.pi / 2, 0.10)),
-              _viewChip('BACK', () => _goTo(math.pi, 0.12)),
-              _viewChip('3/4', () => _goTo(_homeYaw, _homePitch)),
+              _viewChip('FRONT', '0deg 80deg 118%'),
+              _viewChip('SIDE', '90deg 80deg 118%'),
+              _viewChip('BACK', '180deg 80deg 118%'),
+              _viewChip('BEST', _exercise.cameraOrbit),
             ]),
           ),
           Positioned(
@@ -234,9 +318,9 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
             bottom: 12,
             child: IgnorePointer(
               child: Row(children: [
-                _angleChip('KNEE', pose.kneeFlexionDeg),
-                _angleChip('HIP', pose.hipFlexionDeg),
-                _angleChip('TORSO', pose.torsoLeanDeg),
+                _legendDot(AppTheme.neonGreen, 'PRIMARY'),
+                const SizedBox(width: 10),
+                _legendDot(_secondaryColor, 'ASSISTING'),
               ]),
             ),
           ),
@@ -257,10 +341,10 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
     );
   }
 
-  Widget _viewChip(String label, VoidCallback onTap) => Padding(
+  Widget _viewChip(String label, String orbit) => Padding(
         padding: const EdgeInsets.only(right: 6),
         child: GestureDetector(
-          onTap: onTap,
+          onTap: () => _js('orbit(${jsonEncode(orbit)})'),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
@@ -278,34 +362,23 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
         ),
       );
 
-  Widget _angleChip(String label, double degrees) => Container(
-        margin: const EdgeInsets.only(right: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: .55),
-          borderRadius: BorderRadius.circular(8),
+  Widget _legendDot(Color color, String label) => Row(children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(label,
-                style: const TextStyle(
-                    color: Colors.white54,
-                    fontSize: 7.5,
-                    letterSpacing: 1,
-                    fontWeight: FontWeight.w700)),
-            Text('${degrees.round()}°',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700)),
-          ],
-        ),
-      );
+        const SizedBox(width: 5),
+        Text(label,
+            style: const TextStyle(
+                color: Colors.white60,
+                fontSize: 8,
+                letterSpacing: 1,
+                fontWeight: FontWeight.w700)),
+      ]);
 
-  Widget _buildTimeline(double t, double depth, SquatPhase phase) {
-    const flexes = [8, 37, 10, 37, 8];
+  Widget _buildTimeline(RepPhase phase) {
+    final effort = (RepTimeline.contractionAt(_t) * 100).round();
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 0),
       child: Column(
@@ -322,51 +395,29 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
                       letterSpacing: 1,
                       fontWeight: FontWeight.w700)),
             ),
-            Text('DEPTH ${(depth * 100).round()}%',
+            Text('CONTRACTION $effort%',
                 style: const TextStyle(
                     color: AppTheme.neonGreen,
                     fontSize: 11,
                     fontWeight: FontWeight.w700)),
-          ]),
-          const SizedBox(height: 8),
-          Row(children: [
-            for (final p in SquatPhase.values)
-              Expanded(
-                flex: flexes[p.index],
-                child: Container(
-                  height: 4,
-                  margin: const EdgeInsets.symmetric(horizontal: 1.5),
-                  decoration: BoxDecoration(
-                    color: p == phase
-                        ? AppTheme.neonGreen
-                        : AppTheme.cardBgLight,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
           ]),
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               trackHeight: 3,
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-              trackShape: const RectangularSliderTrackShape(),
             ),
             child: Slider(
-              value: t.clamp(0.0, 1.0),
+              value: _t.clamp(0.0, 1.0),
               activeColor: AppTheme.neonGreen,
               inactiveColor: AppTheme.cardBgLight,
-              onChangeStart: (_) {
-                _resumeAfterScrub = _playing;
-                _rep.stop();
-                setState(() => _playing = false);
+              onChangeStart: (_) => _js('pause()'),
+              onChanged: (v) {
+                setState(() => _t = v);
+                _js('seek($v)');
               },
-              onChanged: (v) => _rep.value = v,
               onChangeEnd: (_) {
-                if (_resumeAfterScrub) {
-                  setState(() => _playing = true);
-                  _rep.repeat();
-                }
+                if (_playing) _js('play()');
               },
             ),
           ),
@@ -407,7 +458,7 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: AppTheme.cardBgLight),
           ),
-          child: Text('${_speed == 0.25 ? '0.25' : _speed.toStringAsFixed(1)}×',
+          child: Text('$_speed×',
               style: const TextStyle(
                   color: AppTheme.textPrimary, fontWeight: FontWeight.w600)),
         ),
@@ -415,37 +466,49 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
     ]);
   }
 
-  List<Widget> _buildDetails(double depth, SquatPhase phase) {
-    Widget muscle(MuscleGroup g) => Expanded(
-          child: _MuscleTile(
-            label: g.label,
-            activation: SquatRig.activation(g, depth, phase),
-            selected: _focus == g,
-            onTap: () => setState(() => _focus = _focus == g ? null : g),
-          ),
+  List<Widget> _buildDetails(RepPhase phase) {
+    Widget tile(String group, Color color) => _MuscleTile(
+          label: muscleGroupLabels[group] ?? group,
+          color: color,
+          activation: _exercise.activation(group, _t),
+          selected: _focus == group,
+          onTap: () => _setFocus(group),
         );
     return [
-      const _SectionTitle('TARGET MUSCLES  ·  TAP TO ISOLATE'),
+      Container(
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: AppTheme.cardBg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.cardBgLight),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Icon(Icons.sensors_rounded,
+              color: AppTheme.neonGreen, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(_exercise.setup,
+                style: const TextStyle(
+                    color: AppTheme.textSecondary, fontSize: 12)),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 20),
+      const _SectionTitle('PRIMARY MUSCLES  ·  TAP TO ISOLATE'),
       const SizedBox(height: 10),
-      Row(children: [
-        muscle(MuscleGroup.quadriceps),
-        const SizedBox(width: 8),
-        muscle(MuscleGroup.glutes),
-      ]),
-      const SizedBox(height: 8),
-      Row(children: [
-        muscle(MuscleGroup.hamstrings),
-        const SizedBox(width: 8),
-        muscle(MuscleGroup.core),
-      ]),
-      const SizedBox(height: 22),
+      for (final g in _exercise.primary) tile(g, AppTheme.neonGreen),
+      const SizedBox(height: 14),
+      const _SectionTitle('ASSISTING MUSCLES'),
+      const SizedBox(height: 10),
+      for (final g in _exercise.secondary) tile(g, _secondaryColor),
+      const SizedBox(height: 20),
       const _SectionTitle('COACH CUES'),
       const SizedBox(height: 10),
-      for (final p in SquatPhase.values)
+      for (final p in RepPhase.values)
         _CueTile(
           number: '0${p.index + 1}',
-          title: p.cueTitle,
-          detail: p.cueDetail,
+          title: _exercise.cueTitles[p.index],
+          detail: _exercise.cueDetails[p.index],
           active: p == phase,
         ),
       const SizedBox(height: 16),
@@ -457,10 +520,11 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen>
           border: Border.all(color: const Color(0xFF6B542B)),
         ),
         child: const Text(
-          'Prototype note: the figure is a procedural 3D body and the muscle '
-          'highlights are an illustrative teaching map tied to the movement '
-          'phase. They are not EMG or a measurement of real muscle force, and '
-          'the guide does not yet use camera-based pose tracking.',
+          'The highlights show which muscles an exercise trains and when they '
+          'shorten. They are a teaching map, not a measurement of your own '
+          'muscle activity.\n\n'
+          '3D anatomy: BodyParts3D, © The Database Center for Life Science, '
+          'licensed under CC Attribution-Share Alike 2.1 Japan.',
           style: TextStyle(color: Color(0xFFE5C98E), fontSize: 11),
         ),
       ),
@@ -482,11 +546,13 @@ class _SectionTitle extends StatelessWidget {
 
 class _MuscleTile extends StatelessWidget {
   final String label;
+  final Color color;
   final double activation;
   final bool selected;
   final VoidCallback onTap;
   const _MuscleTile({
     required this.label,
+    required this.color,
     required this.activation,
     required this.selected,
     required this.onTap,
@@ -494,40 +560,40 @@ class _MuscleTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = Color.lerp(
-        const Color(0xFF5E8F80), AppTheme.neonGreen, activation)!;
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(11, 9, 11, 10),
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 11),
         decoration: BoxDecoration(
-          color: selected
-              ? AppTheme.neonGreen.withValues(alpha: .12)
-              : AppTheme.cardBg,
+          color: selected ? color.withValues(alpha: .12) : AppTheme.cardBg,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-              color: selected ? AppTheme.neonGreen : AppTheme.cardBgLight),
+          border: Border.all(color: selected ? color : AppTheme.cardBgLight),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 9),
               Expanded(
                 child: Text(label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: AppTheme.textPrimary,
-                        fontSize: 11.5,
+                        fontSize: 13,
                         fontWeight: FontWeight.w600)),
               ),
               Text('${(activation * 100).round()}%',
                   style: TextStyle(
-                      color: color,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700)),
+                      color: color, fontSize: 12, fontWeight: FontWeight.w700)),
             ]),
-            const SizedBox(height: 7),
+            const SizedBox(height: 8),
             ClipRRect(
               borderRadius: BorderRadius.circular(2),
               child: LinearProgressIndicator(
@@ -594,202 +660,4 @@ class _CueTile extends StatelessWidget {
           ),
         ]),
       );
-}
-
-/// One projected, depth-sortable volume.
-class _Prim {
-  final Offset a, b;
-  final double ra, rb, z;
-  final Color color;
-  final double glow;
-  const _Prim(this.a, this.ra, this.b, this.rb, this.z, this.color, this.glow);
-}
-
-/// Perspective renderer for the [SquatRig] body.
-///
-/// Every body part is a tapered capsule shaded with a gradient across its
-/// width; parts are painted back-to-front (painter's algorithm).
-class _RigPainter extends CustomPainter {
-  final SquatPose pose;
-  final SquatPhase phase;
-  final double yaw, pitch, zoom;
-  final MuscleGroup? focus;
-
-  _RigPainter({
-    required this.pose,
-    required this.phase,
-    required this.yaw,
-    required this.pitch,
-    required this.zoom,
-    required this.focus,
-  });
-
-  static const Vec3 _target = Vec3(0, 0.76, -0.08);
-  static const double _distance = 3.6;
-  static const Offset _light = Offset(-0.6, -0.8);
-  static const Color _skin = Color(0xFF7C8993);
-  static const Color _definition = Color(0xFF8D9BA6);
-  static const Color _muscleRest = Color(0xFF3A5852);
-
-  late double _focal;
-  late Offset _center;
-  late double _cy, _sy, _cp, _sp;
-
-  /// Camera-space depth of [p] (distance in front of the camera).
-  double _depth(Vec3 p) {
-    final q = p - _target;
-    final z = -q.x * _sy + q.z * _cy;
-    return _distance - (q.y * _sp + z * _cp);
-  }
-
-  Offset _project(Vec3 p) {
-    final q = p - _target;
-    final x = q.x * _cy + q.z * _sy;
-    final z = -q.x * _sy + q.z * _cy;
-    final y = q.y * _cp - z * _sp;
-    final depth = _distance - (q.y * _sp + z * _cp);
-    final k = _focal / depth;
-    return Offset(_center.dx + x * k, _center.dy - y * k);
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    _focal = math.min(size.height, size.width * 1.15) * 1.5 * zoom;
-    _center = Offset(size.width / 2, size.height * 0.52);
-    _cy = math.cos(yaw);
-    _sy = math.sin(yaw);
-    _cp = math.cos(pitch);
-    _sp = math.sin(pitch);
-
-    _paintFloor(canvas);
-
-    final prims = <_Prim>[];
-    void add(Vec3 a, double ra, Vec3 b, double rb, Color color, double glow) {
-      final za = _depth(a), zb = _depth(b);
-      prims.add(_Prim(
-        _project(a),
-        ra * _focal / za,
-        _project(b),
-        rb * _focal / zb,
-        (za + zb) / 2,
-        color,
-        glow,
-      ));
-    }
-
-    for (final s in pose.body) {
-      add(s.a, s.ra, s.b, s.rb, s.definition ? _definition : _skin, 0);
-    }
-    for (final m in pose.muscles) {
-      var act = SquatRig.activation(m.group, pose.depth, phase);
-      if (focus != null) {
-        act = m.group == focus ? math.max(act, 0.8) : 0.04;
-      }
-      final color = Color.lerp(_muscleRest, AppTheme.neonGreen, act)!;
-      add(m.a, m.radius, m.b, m.radius, color, act > 0.6 ? act - 0.6 : 0);
-    }
-    prims.sort((p, q) => q.z.compareTo(p.z));
-
-    // One dark silhouette behind everything, so the parts read as one body.
-    final outline = Paint()..color = const Color(0xFF07090A);
-    for (final p in prims) {
-      _capsule(canvas, p.a, p.ra + 1.6, p.b, p.rb + 1.6, outline);
-    }
-    final glow = Paint()
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
-    final fill = Paint();
-    for (final p in prims) {
-      if (p.glow > 0) {
-        glow.color = AppTheme.neonGreen.withValues(alpha: p.glow * 0.9);
-        _capsule(canvas, p.a, p.ra * 1.15, p.b, p.rb * 1.15, glow);
-      }
-      fill.shader = _shade(p);
-      _capsule(canvas, p.a, p.ra, p.b, p.rb, fill);
-    }
-  }
-
-  void _paintFloor(Canvas canvas) {
-    final grid = Paint()
-      ..color = Colors.white.withValues(alpha: .07)
-      ..strokeWidth = 1;
-    for (var i = -5; i <= 5; i++) {
-      final v = i * 0.25;
-      canvas.drawLine(
-          _project(Vec3(v, 0, -1.25)), _project(Vec3(v, 0, 1.25)), grid);
-      canvas.drawLine(
-          _project(Vec3(-1.25, 0, v)), _project(Vec3(1.25, 0, v)), grid);
-    }
-    // Soft contact shadow under the hips.
-    final pelvis = pose[Joint.pelvis];
-    final shadow = Path();
-    for (var i = 0; i < 20; i++) {
-      final a = i * math.pi / 10;
-      final o = _project(Vec3(
-        pelvis.x + math.cos(a) * 0.34,
-        0,
-        pelvis.z * 0.5 + math.sin(a) * 0.30,
-      ));
-      if (i == 0) {
-        shadow.moveTo(o.dx, o.dy);
-      } else {
-        shadow.lineTo(o.dx, o.dy);
-      }
-    }
-    shadow.close();
-    canvas.drawPath(
-      shadow,
-      Paint()
-        ..color = Colors.black.withValues(alpha: .45)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
-    );
-  }
-
-  /// Fills a tapered capsule (two circles joined by their side walls).
-  void _capsule(
-      Canvas canvas, Offset a, double ra, Offset b, double rb, Paint paint) {
-    canvas.drawCircle(a, ra, paint);
-    final d = b - a;
-    final len = d.distance;
-    if (len < 0.5) return;
-    canvas.drawCircle(b, rb, paint);
-    final n = Offset(-d.dy / len, d.dx / len);
-    canvas.drawPath(
-      Path()
-        ..moveTo(a.dx + n.dx * ra, a.dy + n.dy * ra)
-        ..lineTo(b.dx + n.dx * rb, b.dy + n.dy * rb)
-        ..lineTo(b.dx - n.dx * rb, b.dy - n.dy * rb)
-        ..lineTo(a.dx - n.dx * ra, a.dy - n.dy * ra)
-        ..close(),
-      paint,
-    );
-  }
-
-  /// Gradient across the width of a part: lit from the upper left.
-  ui.Gradient _shade(_Prim p) {
-    final hi = Color.lerp(p.color, Colors.white, 0.32)!;
-    final lo = Color.lerp(p.color, Colors.black, 0.52)!;
-    final r = math.max(p.ra, p.rb);
-    final d = p.b - p.a;
-    final len = d.distance;
-    if (len < 0.5) {
-      return ui.Gradient.radial(
-        p.a + Offset(-r * 0.35, -r * 0.42),
-        r * 1.55,
-        [hi, p.color, lo],
-        const [0.0, 0.45, 1.0],
-      );
-    }
-    var n = Offset(-d.dy / len, d.dx / len);
-    if (n.dx * _light.dx + n.dy * _light.dy < 0) n = -n;
-    final mid = (p.a + p.b) / 2.0;
-    return ui.Gradient.linear(
-      mid + n * r,
-      mid - n * r,
-      [hi, p.color, lo],
-      const [0.0, 0.42, 1.0],
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _RigPainter old) => true;
 }

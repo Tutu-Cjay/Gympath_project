@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
+import 'anatomy_studio_screen.dart';
 import 'cable_track_screen.dart';
 
 class ChooseWorkoutScreen extends StatefulWidget {
@@ -127,10 +128,18 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
                                 ],
                               ),
                             ),
-                            Icon(
-                              Icons.arrow_forward_ios_rounded,
-                              size: Responsive.r(context, 14),
-                              color: AppTheme.textMuted,
+                            IconButton(
+                              tooltip: '3D muscle guide',
+                              icon: const Icon(Icons.accessibility_new_rounded),
+                              color: AppTheme.neonGreen,
+                              onPressed: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => AnatomyStudioScreen(
+                                    initialExercise: workout['name'],
+                                  ),
+                                ),
+                              ),
                             ),
                           ],
                         ),

@@ -80,7 +80,7 @@ class _HomeTab extends StatelessWidget {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                tooltip: 'Movement Studio',
+                                tooltip: '3D muscle guide',
                                 icon: const Icon(Icons.accessibility_new_rounded),
                                 color: AppTheme.neonGreen,
                                 onPressed: () => Navigator.push(
