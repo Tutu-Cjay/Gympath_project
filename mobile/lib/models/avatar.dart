@@ -41,7 +41,7 @@ class Avatar {
 
   static const Avatar standard = Avatar();
   static const Avatar standardFemale =
-      Avatar(sex: AvatarSex.female, hair: 'hair_bob');
+      Avatar(sex: AvatarSex.female, hair: 'hair_ponytail');
 
   /// The first tone matches the app's graphite body.
   static const List<AvatarSwatch> skinTones = [
@@ -68,13 +68,10 @@ class Avatar {
     AvatarOption('Short', 'hair_short'),
   ];
 
+  /// The female figure has one fixed look: a ponytail (its colour is still
+  /// the user's).
   static const List<AvatarOption> femaleHair = [
-    AvatarOption('Pixie', 'hair_pixie'),
-    AvatarOption('Bob', 'hair_bob'),
-    AvatarOption('Long', 'hair_long'),
     AvatarOption('Ponytail', 'hair_ponytail'),
-    AvatarOption('Bun', 'hair_bun'),
-    AvatarOption('None', 'none'),
   ];
 
   static List<AvatarOption> hairStylesFor(AvatarSex sex) =>

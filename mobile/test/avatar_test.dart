@@ -36,7 +36,8 @@ void main() {
     expect(f.eyeColor, 3);
     expect(f.hairColor, 2);
     expect(Avatar.femaleHair.map((o) => o.id), contains(f.hair));
-    expect(m.copyWith(hair: 'none').withSex(AvatarSex.female).hair, 'none');
+    expect(m.copyWith(hair: 'none').withSex(AvatarSex.female).hair, 'hair_ponytail');
+    expect(f.withSex(AvatarSex.male).hair, Avatar.standard.hair);
   });
 
   test('what the 3D page gets', () {

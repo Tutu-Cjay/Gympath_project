@@ -131,8 +131,9 @@ class _AvatarScreenState extends State<AvatarScreen> {
                       (i) => _set(a.copyWith(skinTone: i))),
                   _swatches('Eyes', Avatar.eyeColors, a.eyeColor,
                       (i) => _set(a.copyWith(eyeColor: i))),
-                  _options('Hair', Avatar.hairStylesFor(a.sex), a.hair,
-                      (id) => _set(a.copyWith(hair: id))),
+                  if (Avatar.hairStylesFor(a.sex).length > 1)
+                    _options('Hair', Avatar.hairStylesFor(a.sex), a.hair,
+                        (id) => _set(a.copyWith(hair: id))),
                   _swatches('Hair colour', Avatar.hairColors, a.hairColor,
                       (i) => _set(a.copyWith(hairColor: i))),
                 ],

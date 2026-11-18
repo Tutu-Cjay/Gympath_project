@@ -62,11 +62,11 @@ SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 MUSCLE_INFLATE = 0.0035
 # Avatar head: eyes (the app colours the iris) and hair styles, shown one at a
 # time by the app. Male hair: caps over the scalp (base, extra on top, m);
-# female hair: shells from tools/real_head.py.
+# female: one fixed style, a ponytail (shells from tools/real_head.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import real_head  # noqa: E402
 HAIR_STYLES = {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)}
-FEMALE_HAIR = real_head.HAIR["female"]
+FEMALE_HAIR = ["hair_ponytail"]     # the female figure has one fixed look
 FACE_MATERIALS = (["sclera", "iris", "pupil", "lashes"]
                   + (FEMALE_HAIR if SEX == "female" else list(HAIR_STYLES)))
 # The solid head fades into the see-through body over the neck: this many
@@ -630,7 +630,7 @@ if FEMALE:
     _, pieces, _, head_info = real_head.build(MPFB_DATA, "female")
     s_mh, t_mh = pair["scale"], pair["offset"]["female"]
     for mat, pv, pf, _ in pieces:
-        if mat in ("sclera", "iris", "pupil", "lashes") or mat.startswith("hair_"):
+        if mat in ("sclera", "iris", "pupil", "lashes") or mat in FEMALE_HAIR:
             female_pieces.append((mat, pv * s_mh + t_mh, pf))
     head_pts = np.concatenate([pv for mat, pv, pf, _ in pieces if mat in ("head", "lips")]) * s_mh + t_mh
     head_centre = head_info["centre"] * s_mh + t_mh
