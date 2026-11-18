@@ -14,8 +14,8 @@ the working muscles show through in their real shape.
     ANATOMY_SEX=female MPFB_DATA=mpfb2/src/mpfb/data python tools/build_anatomy_model.py \
         BodyParts3D/assets/BodyParts3D_data mobile/assets/models/anatomy_female.glb
 
-The female body and head come from MakeHuman (MPFB2 data,
-CC0): see tools/real_head.py and tools/mh_body.py.
+The female figure is this one reshaped by how a MakeHuman female differs from
+a MakeHuman male (MPFB2 data, CC0): see tools/mh_body.py.
 
 Data: BodyParts3D, (c) The Database Center for Life Science, licensed under
 CC Attribution-Share Alike 2.1 Japan. The generated .glb is a derivative of
@@ -59,16 +59,15 @@ SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 
 # Muscles are pushed out along their normals by this much (m): the raw scans
 # sit well inside the skin and read thin through it.
-MUSCLE_INFLATE = 0.0035
+MUSCLE_INFLATE = 0.0035 if os.environ.get("ANATOMY_SEX", "male") == "male" else 0.0
 # Avatar head: eyes (the app colours the iris) and hair styles, shown one at a
-# time by the app. Male hair: caps over the scalp (base, extra on top, m);
-# female: one fixed style, a ponytail (shells from tools/real_head.py).
+# time by the app. Hair: caps over the scalp (base, extra on top, m).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import real_head  # noqa: E402
-HAIR_STYLES = {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)}
-FEMALE_HAIR = ["hair_ponytail"]     # the female figure has one fixed look
-FACE_MATERIALS = (["sclera", "iris", "pupil", "lashes"]
-                  + (FEMALE_HAIR if SEX == "female" else list(HAIR_STYLES)))
+# The female figure has one fixed look: hair pulled back into a ponytail.
+HAIR_STYLES = ({"hair_ponytail": (0.004, 0.006)} if SEX == "female"
+               else {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)})
+FACE_MATERIALS = ["sclera", "iris", "pupil"] + list(HAIR_STYLES)
 # The solid head fades into the see-through body over the neck: this many
 # bands (materials neck1..neckN, each a bit more solid) over NECK_FADE metres.
 NECK_BANDS = 8
@@ -400,9 +399,9 @@ def segment_lines():
 
 # --------------------------------------------------------- female body ----
 # The female figure keeps BodyParts3D's muscles and bones, warped by how a
-# MakeHuman female differs from a MakeHuman male in the same pose and place
-# (the female's chest is taken flat for that, so the pectorals follow the
-# ribcage, not the breasts). Her skin is the MakeHuman female body itself.
+# MakeHuman female differs from a MakeHuman male in the same pose and place.
+# Her skin is BodyParts3D's skin warped the same way, so skin and muscles
+# stay together exactly as on the male figure.
 import mh_body  # noqa: E402
 pair = mh_body.posed_pair(MPFB_DATA, J)
 if SEX == "female":
@@ -439,61 +438,58 @@ if SEX == "female":
     mh_seg = np.array([SEGMENT_ID[SEGMENT_OF[BONE_SEGMENTS[k]]] for k in mh_w.argmax(axis=1)])
 
     # Each anatomy vertex moves with the MakeHuman vertices of its own
-    # segment (an arm resting on the hip follows the arm, not the hip).
-    def anat_segment(pts):
-        best = np.full(len(pts), 1e9)
-        label = np.zeros(len(pts), int)
+    # segment (an arm resting on the hip follows the arm, not the hip),
+    # blended over several cm where segments meet, so the skin and the
+    # muscle just under it always move alike.
+    def segment_distances(pts):
+        ids = sorted(set(SEGMENT_ID.values()))
+        D = np.full((len(pts), len(ids)), 1e9)
         for k, (a, b) in enumerate(segment_lines()):
             ab = b - a
             t = np.clip(((pts - a) @ ab) / (ab @ ab), 0, 1)
             d = np.linalg.norm(pts - (a + t[:, None] * ab), axis=1)
-            closer = d < best
-            best[closer], label[closer] = d[closer], SEGMENT_ID[SEGMENT_LINES[k][0]]
-        return label
+            c = ids.index(SEGMENT_ID[SEGMENT_LINES[k][0]])
+            D[:, c] = np.minimum(D[:, c], d)
+        return ids, D
 
-    delta = pair["female_flat"] - pair["male"]
-    trees = {}
+    seg_ix = {}
     for seg in set(SEGMENT_ID.values()):
         ix = body_ix[mh_seg[body_ix] == seg]
         if len(ix) < 12:
             print("female warp: segment", seg, "has", len(ix), "vertices; using all")
             ix = body_ix
-        trees[seg] = (cKDTree(pair["male"][ix]), delta[ix])
+        seg_ix[seg] = (cKDTree(pair["male"][ix]), ix)
     print("female warp segments:", {k: int((mh_seg[body_ix] == v).sum()) for k, v in SEGMENT_ID.items()})
 
-    def warp(pts):
-        out = pts.copy()
-        label = anat_segment(pts)
-        for seg, (tree, dl) in trees.items():
-            sel = label == seg
+    def warp(pts, target="female"):
+        delta = pair[target] - pair["male"]
+        ids, D = segment_distances(pts)
+        rel = D - D.min(axis=1, keepdims=True)
+        W = np.where(rel < 0.15, np.exp(-rel / 0.035), 0.0)
+        W /= W.sum(axis=1, keepdims=True)
+        move = np.zeros_like(pts)
+        for c, seg in enumerate(ids):
+            sel = W[:, c] > 1e-4
             if not sel.any():
                 continue
+            tree, ix = seg_ix[seg]
             d, i = tree.query(pts[sel], k=12)
             w = 1.0 / (d + 0.015) ** 2
-            out[sel] += (dl[i] * w[:, :, None]).sum(axis=1) / w.sum(axis=1)[:, None]
-        return out
+            field = (delta[ix][i] * w[:, :, None]).sum(axis=1) / w.sum(axis=1)[:, None]
+            move[sel] += field * W[sel, c][:, None]
+        return pts + move
 
+    # Skin weights are worked out on the unwarped figure (see below), where
+    # the arms are clear of the body as on the male.
     for p in under_parts:
-        p["verts"] = warp(p["verts"])
-    remap = -np.ones(len(pair["female"]), int)
-    remap[body_ix] = np.arange(len(body_ix))
-    skin["verts"], skin["faces"] = pair["female"][body_ix], remap[tris]
-    skin["weights"] = mh_w[body_ix] / np.maximum(mh_w[body_ix].sum(axis=1, keepdims=True), 1e-9)
-    skin["orig_verts"] = skin["verts"]
-    # Keep every muscle a little under the female skin.
-    sn = np.zeros_like(skin["verts"])
-    fn = np.cross(skin["verts"][skin["faces"][:, 1]] - skin["verts"][skin["faces"][:, 0]],
-                  skin["verts"][skin["faces"][:, 2]] - skin["verts"][skin["faces"][:, 0]])
-    for k in range(3):
-        np.add.at(sn, skin["faces"][:, k], fn)
-    sn /= np.maximum(np.linalg.norm(sn, axis=1, keepdims=True), 1e-12)
-    skin_tree = cKDTree(skin["verts"])
-    for p in parts:
-        _, i = skin_tree.query(p["verts"])
-        depth = ((p["verts"] - skin["verts"][i]) * sn[i]).sum(axis=1)
-        # 15 mm leaves room for the 3.5 mm inflation and the coarser skin.
-        out = depth > -0.015
-        p["verts"][out] -= sn[i][out] * (depth[out] + 0.015)[:, None]
+        p["male_verts"] = p["verts"].copy()
+    male_skin = skin["verts"].copy()
+    # Muscles, bones and skin all move by the same field, so the muscles sit
+    # under the skin exactly as on the male (the sports top covers the bust).
+    for p in under_parts:
+        p["verts"] = warp(p["verts"], "female")
+    skin["verts"] = warp(skin["verts"], "female")
+    female_skin = skin["verts"].copy()
     J, mid_hip, L4, T11, T6, C7, C1, head_top = compute_joints()
 
 # name -> (head, tail, parent)
@@ -617,26 +613,11 @@ def vertex_normals(v, f):
 
 
 # --- avatar head ---------------------------------------------------------------
-# The head is the skin's own head, drawn solid, with eyes (iris coloured by the
-# app) and hair. The male's eyes are BodyParts3D's eyeballs; the female's
-# head is MakeHuman's (her skin is the MakeHuman body), with its eyes, lashes
-# and hair styles from tools/real_head.py. The neck line where the solid head
-# starts sits under the chin.
+# The head is the skin's own head, drawn solid, with BodyParts3D's eyes (the
+# app colours the iris) and hair. The neck line where the solid head starts
+# sits just under the jaw.
 FEMALE = SEX == "female"
 NECK_Z = C7[2] + 0.55 * (C1[2] - C7[2])
-female_pieces = []
-if FEMALE:
-    real_head.BASE_TARGETS = []        # exactly the skin's head
-    _, pieces, _, head_info = real_head.build(MPFB_DATA, "female")
-    s_mh, t_mh = pair["scale"], pair["offset"]["female"]
-    for mat, pv, pf, _ in pieces:
-        if mat in ("sclera", "iris", "pupil", "lashes") or mat in FEMALE_HAIR:
-            female_pieces.append((mat, pv * s_mh + t_mh, pf))
-    head_pts = np.concatenate([pv for mat, pv, pf, _ in pieces if mat in ("head", "lips")]) * s_mh + t_mh
-    head_centre = head_info["centre"] * s_mh + t_mh
-    head_scale = head_info["scale"] * s_mh
-    chin_z = head_pts[(np.abs(head_pts[:, 0]) < 0.02) & (head_pts[:, 1] < head_centre[1] - 0.5 * head_scale), 2].min()
-    NECK_Z = min(NECK_Z, chin_z - 0.014)
 print("neck line", round(NECK_Z, 3), "C7", round(C7[2], 3), "C1", round(C1[2], 3))
 
 
@@ -664,12 +645,43 @@ for p in parts:
         remap = -np.ones(len(v), int)
         remap[used] = np.arange(len(used))
         p["verts"], p["faces"] = v[used], remap[f[keep_f]]
+        if "male_verts" in p:
+            p["male_verts"] = p["male_verts"][used]
 parts = [p for p in parts if len(p["faces"]) >= 4]
 for p in parts:
     p["normals"] = vertex_normals(p["verts"], p["faces"])
     p["fade"] = neck_fade(p["verts"][:, 2])
     push = MUSCLE_INFLATE * p["fade"] - 0.004 * (1 - p["fade"])
     p["verts"] = p["verts"] + p["normals"] * push[:, None]
+
+if SEX == "female":
+    # Her clothes are opaque: muscle under them is never seen but could poke
+    # through the reshaped skin, so the parts of torso and hip muscles that
+    # lie under the shorts and the sports top are left out.
+    _hip = (J["hip_l"][2] + J["hip_r"][2]) / 2
+    _bands = [(_hip - 0.17, _hip + 0.125, ("torso", "thigh_l", "thigh_r")),
+              (T11[2] + 0.45 * (T6[2] - T11[2]), C7[2] - 0.11, ("torso",))]
+    _lines = list(zip([n for n, _, _ in SEGMENT_LINES], segment_lines()))
+    dropped = 0
+    for p in parts:
+        v, f = p["verts"], p["faces"]
+        best = np.full(len(v), 1e9)
+        seg = np.empty(len(v), dtype=object)
+        for name, (sa, sb) in _lines:
+            ab = sb - sa
+            t = np.clip(((v - sa) @ ab) / (ab @ ab), 0, 1)
+            d = np.linalg.norm(v - (sa + t[:, None] * ab), axis=1)
+            closer = d < best
+            best[closer], seg[closer] = d[closer], name
+        hidden = np.zeros(len(v), bool)
+        for lo, hi, segs in _bands:
+            hidden |= (v[:, 2] > lo + 0.01) & (v[:, 2] < hi - 0.01) & np.isin(seg, segs)
+        drop = hidden[f].all(axis=1)
+        if drop.any():
+            dropped += int(drop.sum())
+            p["faces"] = f[~drop]
+    parts = [p for p in parts if len(p["faces"]) >= 4]
+    print("female: left out", dropped, "muscle triangles under her clothes")
 
 material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
 all_verts, all_faces, all_mats, all_w = [], [], [], []
@@ -705,6 +717,25 @@ def slice_at(verts, faces, heights):
 # Shorts: the band of skin between mid-thigh and the waist, as its own material.
 hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
 hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
+if SEX == "female":
+    # Under her shorts the hip muscles sit close to the skin: pull them 6 mm
+    # towards the bone axis so they never show through the cloth.
+    for p in parts:
+        v = p["verts"]
+        sel = (v[:, 2] > hem_z - 0.02) & (v[:, 2] < waist_z + 0.02)
+        if not sel.any():
+            continue
+        q = v[sel]
+        best, axis_pt = np.full(len(q), 1e9), np.zeros_like(q)
+        for a, b in segment_lines():
+            ab = b - a
+            t = np.clip(((q - a) @ ab) / (ab @ ab), 0, 1)
+            c = a + t[:, None] * ab
+            d = np.linalg.norm(q - c, axis=1)
+            closer = d < best
+            best[closer], axis_pt[closer] = d[closer], c[closer]
+        out = (q - axis_pt) / np.maximum(best, 1e-9)[:, None]
+        v[sel] = q - out * np.minimum(0.006, 0.5 * best)[:, None]
 # Head: opaque, from just under the jaw up.
 neck_z = NECK_Z
 neck_cuts = [neck_z - NECK_FADE * i / NECK_BANDS for i in range(1, NECK_BANDS + 1)]
@@ -723,32 +754,49 @@ panel_y = np.percentile(sv[flank, 1], 2) - 0.018
 across = np.clip((0.115 - np.abs(sv[:, 0])) / 0.05, 0, 1)   # fully flat for |x| < 6.5 cm
 up = np.clip((waist_z - sv[:, 2]) / (waist_z - hip_z - 0.02), 0, 1)
 blend = np.where(band & (sv[:, 1] < 0), (across * across * (3 - 2 * across)) * up, 0.0)
+if SEX == "female":
+    # Her shorts: only the crotch is smoothed (the male figure's shape
+    # there), pulled back onto the level of the skin beside it.
+    crotch = (sv[:, 2] > hip_z - 0.16) & (sv[:, 2] < hip_z + 0.04) & (sv[:, 1] < 0)
+    side = crotch & (np.abs(sv[:, 0]) > 0.05) & (np.abs(sv[:, 0]) < 0.08)
+    panel_y = np.median(sv[side, 1])
+    across = np.clip((0.075 - np.abs(sv[:, 0])) / 0.035, 0, 1)
+    vert = np.clip(np.minimum((sv[:, 2] - (hip_z - 0.16)) / 0.04, (hip_z + 0.04 - sv[:, 2]) / 0.04), 0, 1)
+    blend = np.where(crotch & (sv[:, 1] < panel_y), across * across * (3 - 2 * across) * vert, 0.0)
+
 sv[:, 1] = sv[:, 1] + (panel_y - sv[:, 1]) * blend
 # Folds that were flattened onto the panel now face backwards: drop them.
 tri = sv[skin["faces"]]
 facing_back = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 1] >= 0
 flat = (blend[skin["faces"]] > 0.98).all(axis=1)
-skin["faces"] = skin["faces"][~(flat & facing_back)]
+if SEX != "female":      # her smoothing is gentle; dropping folds would leave holes
+    skin["faces"] = skin["faces"][~(flat & facing_back)]
 
 under_pts = np.concatenate([p["verts"] for p in under_parts])
 under_w = np.concatenate([skin_weights(p) for p in under_parts])
-near_d, near_i = cKDTree(under_pts).query(skin["verts"], k=8)
+query_pts = skin["verts"]
+if SEX == "female":
+    # Back to the male shape. Slicing keeps the original vertices first (in
+    # order) and appends the cut points, which lie on original edges: those
+    # take their nearest original vertex.
+    n0 = len(female_skin)
+    i = np.arange(len(skin["verts"]))
+    if len(i) > n0:
+        _, i[n0:] = cKDTree(female_skin).query(skin["verts"][n0:])
+    query_pts = male_skin[i] + (skin["verts"] - female_skin[i])
+    under_pts = np.concatenate([p["male_verts"] for p in under_parts])
+near_d, near_i = cKDTree(under_pts).query(query_pts, k=8)
 falloff = 1.0 / (near_d + 0.004) ** 2
 skin_w = (under_w[near_i] * falloff[:, :, None]).sum(axis=1)
 skin_w /= skin_w.sum(axis=1, keepdims=True)
-if "weights" in skin:
-    # MakeHuman skin brings its own weights; vertices added by the slicing
-    # take those of the nearest original vertex.
-    _, orig = cKDTree(skin["orig_verts"]).query(skin["verts"])
-    skin_w = np.zeros((len(skin["verts"]), len(BONE_NAMES)))
-    for k, b in enumerate(BONE_SEGMENTS):
-        skin_w[:, BONE_NAMES.index(b)] = skin["weights"][orig, k]
-# Male eyes: BodyParts3D's eyeballs, seen through an almond-shaped opening
-# cut in the skin in front of each.
+# Eyes: BodyParts3D's eyeballs, seen through an almond-shaped opening cut in
+# the skin in front of each.
 male_eyes = []
-if not FEMALE:
+if True:
     eb = weld(read_stl("FMA12513"))[0]
     eb[:, 2] -= ground
+    if FEMALE:
+        eb = warp(eb, "female")
     for side in (eb[eb[:, 0] > 0], eb[eb[:, 0] <= 0]):
         c = (side.min(axis=0) + side.max(axis=0)) / 2
         male_eyes.append((c, (side.max(axis=0) - side.min(axis=0)).mean() / 2))
@@ -776,6 +824,21 @@ if SEX == "female":
     on_torso = skin_w[skin["faces"]][:, :, torso_ix].sum(axis=2).mean(axis=1) > 0.6
     top = on_torso & (centre[:, 2] > bust_lo) & (centre[:, 2] < bust_hi)
     skin_mat[top] = material_names.index("shorts")
+    # Her clothes sit a little off the skin, so no muscle shows through them.
+    from mesh_util import vertex_normals as _vn
+    sv = skin["verts"]
+    cn = _vn(sv, skin["faces"])
+    best, axis_pt = np.full(len(sv), 1e9), np.zeros_like(sv)
+    for sa, sb in segment_lines():
+        ab = sb - sa
+        t = np.clip(((sv - sa) @ ab) / (ab @ ab), 0, 1)
+        q = sa + t[:, None] * ab
+        d = np.linalg.norm(sv - q, axis=1)
+        closer = d < best
+        best[closer], axis_pt[closer] = d[closer], q[closer]
+    cn *= np.sign(((sv - axis_pt) * cn).sum(axis=1) + 1e-12)[:, None]
+    cloth = np.unique(skin["faces"][skin_mat == material_names.index("shorts")])
+    sv[cloth] += cn[cloth] * 0.007
 skin_mat[head] = material_names.index("head")
 # Neck bands: band 1 sits just under the head (most solid), band N lowest.
 near_neck = (np.abs(centre[:, 0]) < 0.14) & ~head & ~shorts
@@ -804,17 +867,14 @@ def add_rigid(mat, v, f):
     offset += len(v)
 
 
-if FEMALE:
-    for mat, v, f in female_pieces:
-        add_rigid(mat, v, f)
-else:
+if True:
     for c, r in male_eyes:
         fwd = np.array([0.06 if c[0] > 0 else -0.06, -1.0, 0.0])
         for mat, (v, f) in real_head.eyeball(c, r * 0.97, fwd).items():
             add_rigid(mat, v, f)
 
 
-# --- male hair ----------------------------------------------------------------
+# --- hair -------------------------------------------------------------------
 def smooth_field(field, faces, n_verts, rounds):
     """Average a per-vertex field with its mesh neighbours a few times."""
     from scipy.sparse import coo_matrix, identity
@@ -832,14 +892,15 @@ def smooth_field(field, faces, n_verts, rounds):
 # Scalp: head skin above a hairline that runs from the forehead down to the
 # nape. Each style is a copy of it pushed out along the (smoothed) normals,
 # thinning to nothing at the hairline so the edge blends into the skin.
-if not FEMALE:
+if True:
     head_faces = skin["faces"][head]
     head_v = np.unique(head_faces)
     hv = skin["verts"]
     top_z = hv[head_v, 2].max()
     front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
     along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
-    hairline = (top_z - 0.085) + ((C1[2] + 0.005) - (top_z - 0.085)) * along ** 1.15
+    front_hl = top_z - (0.072 if FEMALE else 0.085)   # hers is pulled back
+    hairline = front_hl + ((C1[2] + 0.005) - front_hl) * along ** 1.15
     above = hv[:, 2] - hairline
     scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
     scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
@@ -857,6 +918,16 @@ if not FEMALE:
         all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
         all_w.append(skin_w[used])
         offset += len(used)
+    if FEMALE:
+        # Ponytail: from inside the back of the head, out and down.
+        back = hv[head_v][hv[head_v, 2] > top_z - 0.09]
+        by = back[:, 1].max()
+        z0 = top_z - 0.07
+        pts = [[0, by - 0.03, z0 + 0.01], [0, by + 0.015, z0 - 0.005], [0, by + 0.04, z0 - 0.04],
+               [0, by + 0.05, z0 - 0.10], [0, by + 0.045, z0 - 0.17], [0, by + 0.035, z0 - 0.23]]
+        from mesh_util import tube
+        tv, tf = tube(pts, [0.022, 0.024, 0.022, 0.018, 0.013, 0.007], 14)
+        add_rigid("hair_ponytail", tv, tf)
 
 
 # ---------------------------------------------------------------- props ----
@@ -1117,6 +1188,10 @@ def solve_pose(ex_name, c):
     for s, sx in (("l", 1.0), ("r", -1.0)):
         for bone, key in ((f"upperarm_{s}", "upper"), (f"lowerarm_{s}", "fore")):
             d = slerp(ex[key][0], ex[key][1], c)
+            if SEX == "female":
+                # Her hips are wider for her shoulders: a hanging arm swings
+                # out a little more so it clears them.
+                d = Vector((d.x + (0.13 if key == "upper" else 0.10) * max(0.0, -d.z), d.y, d.z)).normalized()
             aims[bone] = Vector((d.x * sx, d.y, d.z))
         aims[f"hand_{s}"] = aims[f"lowerarm_{s}"]
         if seat:
