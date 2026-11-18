@@ -8,32 +8,26 @@ class AvatarSwatch {
   const AvatarSwatch(this.name, this.color);
 }
 
-/// The user's figure in the 3D views: build, skin tone, shorts and how much
-/// of the muscles shows through the skin.
+/// Hair styles; [id] is the material of that hair cap in the 3D model.
+class HairStyle {
+  final String name;
+  final String id;
+  const HairStyle(this.name, this.id);
+}
+
+/// The user's avatar. The body is the same for everyone (a normal build with
+/// see-through skin, so the working muscles show); only the head is the
+/// user's own: skin tone and hair.
 class Avatar {
-  /// Muscle mass, 0 = slim .. 1 = bodybuilder (the model's Muscular key).
-  final double muscle;
-
-  /// Body fat, 0 = lean .. 1 = soft (the model's BodyFat key).
-  final double fat;
-
-  /// How see-through the skin is: 0 = solid .. 1 = muscles fully visible.
-  final double seeThrough;
-
   final int skinTone; // index into [skinTones]
-  final int shorts; // index into [shortsColors]
+  final int hair; // index into [hairStyles]
+  final int hairColor; // index into [hairColors]
 
-  const Avatar({
-    this.muscle = 0.45,
-    this.fat = 0.15,
-    this.seeThrough = 0.55,
-    this.skinTone = 0,
-    this.shorts = 0,
-  });
+  const Avatar({this.skinTone = 0, this.hair = 2, this.hairColor = 0});
 
   static const Avatar standard = Avatar();
 
-  /// The first tone is the app's stylised graphite figure.
+  /// The first tone matches the app's graphite body.
   static const List<AvatarSwatch> skinTones = [
     AvatarSwatch('Graphite', Color(0xFF959AA2)),
     AvatarSwatch('Light', Color(0xFFF1C7A8)),
@@ -43,27 +37,24 @@ class Avatar {
     AvatarSwatch('Deep', Color(0xFF5C3A26)),
   ];
 
-  static const List<AvatarSwatch> shortsColors = [
-    AvatarSwatch('Black', Color(0xFF3E4148)),
-    AvatarSwatch('Navy', Color(0xFF2B3A67)),
-    AvatarSwatch('Grey', Color(0xFF7D828B)),
-    AvatarSwatch('Neon', Color(0xFF00E676)),
-    AvatarSwatch('Red', Color(0xFFD7263D)),
+  static const List<HairStyle> hairStyles = [
+    HairStyle('None', 'none'),
+    HairStyle('Buzz', 'hair_buzz'),
+    HairStyle('Short', 'hair_short'),
   ];
 
-  Avatar copyWith({
-    double? muscle,
-    double? fat,
-    double? seeThrough,
-    int? skinTone,
-    int? shorts,
-  }) =>
-      Avatar(
-        muscle: muscle ?? this.muscle,
-        fat: fat ?? this.fat,
-        seeThrough: seeThrough ?? this.seeThrough,
+  static const List<AvatarSwatch> hairColors = [
+    AvatarSwatch('Black', Color(0xFF1C1A18)),
+    AvatarSwatch('Dark brown', Color(0xFF3B2A20)),
+    AvatarSwatch('Brown', Color(0xFF6B4A30)),
+    AvatarSwatch('Blonde', Color(0xFFC8A46A)),
+    AvatarSwatch('Grey', Color(0xFF9A9A9A)),
+  ];
+
+  Avatar copyWith({int? skinTone, int? hair, int? hairColor}) => Avatar(
         skinTone: skinTone ?? this.skinTone,
-        shorts: shorts ?? this.shorts,
+        hair: hair ?? this.hair,
+        hairColor: hairColor ?? this.hairColor,
       );
 
   /// sRGB swatch colour to the linear factor glTF materials use.
@@ -75,53 +66,38 @@ class Avatar {
     return [r(c.r), r(c.g), r(c.b)];
   }
 
-  /// Skin opacity in the 3D view. Even "fully see-through" keeps a hint of
-  /// skin so the outline stays; body fat covers the muscles, as it does.
-  double get skinAlpha {
-    final base = 0.9 - 0.75 * seeThrough.clamp(0.0, 1.0);
-    return base + (1 - base) * 0.6 * fat.clamp(0.0, 1.0);
-  }
-
   /// What the 3D page needs (see AnatomyViewer).
   Map<String, Object> toJs() => {
-        'muscle': muscle.clamp(0.0, 1.0),
-        'fat': fat.clamp(0.0, 1.0),
-        'skinAlpha': skinAlpha,
-        'skin': linear(skinTones[skinTone.clamp(0, skinTones.length - 1)].color),
-        'shorts': linear(shortsColors[shorts.clamp(0, shortsColors.length - 1)].color),
+        'skin': linear(skinTones[skinTone].color),
+        'hair': hairStyles[hair].id,
+        'hairColor': linear(hairColors[hairColor].color),
       };
 
   @override
   bool operator ==(Object other) =>
       other is Avatar &&
-      other.muscle == muscle &&
-      other.fat == fat &&
-      other.seeThrough == seeThrough &&
       other.skinTone == skinTone &&
-      other.shorts == shorts;
+      other.hair == hair &&
+      other.hairColor == hairColor;
 
   @override
-  int get hashCode => Object.hash(muscle, fat, seeThrough, skinTone, shorts);
+  int get hashCode => Object.hash(skinTone, hair, hairColor);
 
-  Map<String, dynamic> toJson() => {
-        'muscle': muscle,
-        'fat': fat,
-        'seeThrough': seeThrough,
-        'skinTone': skinTone,
-        'shorts': shorts,
-      };
+  Map<String, dynamic> toJson() =>
+      {'skinTone': skinTone, 'hair': hair, 'hairColor': hairColor};
 
+  /// Unknown or out-of-range values (or settings from older versions) fall
+  /// back to the standard avatar.
   factory Avatar.fromJson(Map<String, dynamic> j) {
-    double d(String k, double fallback) =>
-        j[k] is num ? (j[k] as num).toDouble().clamp(0.0, 1.0) : fallback;
-    int i(String k, int max) =>
-        j[k] is int ? (j[k] as int).clamp(0, max - 1) : 0;
+    int i(String k, int count, int fallback) {
+      final v = j[k];
+      return v is int && v >= 0 && v < count ? v : fallback;
+    }
+
     return Avatar(
-      muscle: d('muscle', standard.muscle),
-      fat: d('fat', standard.fat),
-      seeThrough: d('seeThrough', standard.seeThrough),
-      skinTone: i('skinTone', skinTones.length),
-      shorts: i('shorts', shortsColors.length),
+      skinTone: i('skinTone', skinTones.length, standard.skinTone),
+      hair: i('hair', hairStyles.length, standard.hair),
+      hairColor: i('hairColor', hairColors.length, standard.hairColor),
     );
   }
 }

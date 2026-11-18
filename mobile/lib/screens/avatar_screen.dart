@@ -6,9 +6,9 @@ import '../services/avatar_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/anatomy_viewer.dart';
 
-/// Build your own figure: muscle mass, body fat, skin tone, shorts and how
-/// much of the muscles shows through. The preview updates live; Save makes it
-/// the figure in every 3D view.
+/// Your avatar's head: skin tone and hair. The body stays the same for
+/// everyone so the muscles read the same way. The preview updates live; Save
+/// puts the head on the figure in every 3D view.
 class AvatarScreen extends StatefulWidget {
   const AvatarScreen({super.key});
 
@@ -24,9 +24,10 @@ class _AvatarScreenState extends State<AvatarScreen> {
   String _view = 'front';
 
   static final CableExercise _pose = cableExerciseByName('Cable Bicep Curl')!;
+  // Close on the head and shoulders.
   static const Map<String, String> _orbits = {
     'front': '0deg 86deg 3.2m',
-    'side': '90deg 86deg 3.2m',
+    'side': '70deg 86deg 3.2m',
     'back': '180deg 86deg 3.2m',
   };
 
@@ -111,7 +112,8 @@ class _AvatarScreenState extends State<AvatarScreen> {
                         controller: _viewer,
                         onStatus: _onStatus,
                         initialOrbit: _orbits['front'],
-                        initialTarget: '0m 1.05m 0m',
+                        initialTarget: '0m 1.5m 0m',
+                        initialFieldOfView: '9deg',
                       ),
                     ),
                     if (!_ready)
@@ -169,19 +171,16 @@ class _AvatarScreenState extends State<AvatarScreen> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
                 children: [
-                  _slider('Muscle mass', 'Slim', 'Built', _avatar.muscle,
-                      (v) => _set(_avatar.copyWith(muscle: v))),
-                  _slider('Body fat', 'Lean', 'Soft', _avatar.fat,
-                      (v) => _set(_avatar.copyWith(fat: v))),
-                  _slider('Muscles through the skin', 'Hidden', 'Visible',
-                      _avatar.seeThrough,
-                      (v) => _set(_avatar.copyWith(seeThrough: v))),
-                  const SizedBox(height: 6),
                   _swatches('Skin tone', Avatar.skinTones, _avatar.skinTone,
                       (i) => _set(_avatar.copyWith(skinTone: i))),
-                  const SizedBox(height: 14),
-                  _swatches('Shorts', Avatar.shortsColors, _avatar.shorts,
-                      (i) => _set(_avatar.copyWith(shorts: i))),
+                  const SizedBox(height: 16),
+                  _hairStyles(),
+                  if (_avatar.hair != 0) ...[
+                    const SizedBox(height: 16),
+                    _swatches('Hair colour', Avatar.hairColors,
+                        _avatar.hairColor,
+                        (i) => _set(_avatar.copyWith(hairColor: i))),
+                  ],
                 ],
               ),
             ),
@@ -214,30 +213,23 @@ class _AvatarScreenState extends State<AvatarScreen> {
           letterSpacing: 1.2,
           fontWeight: FontWeight.w700));
 
-  Widget _slider(String label, String low, String high, double value,
-      ValueChanged<double> onChanged) {
+  Widget _hairStyles() {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _label(label),
-      Row(children: [
-        SizedBox(
-          width: 52,
-          child: Text(low,
-              style: const TextStyle(color: AppTheme.textMuted, fontSize: 11)),
-        ),
-        Expanded(
-          child: Slider(
-            value: value,
-            onChanged: onChanged,
-            activeColor: AppTheme.neonGreen,
-            inactiveColor: AppTheme.cardBgLight,
+      _label('Hair · ${Avatar.hairStyles[_avatar.hair].name}'),
+      const SizedBox(height: 10),
+      Wrap(spacing: 8, children: [
+        for (var i = 0; i < Avatar.hairStyles.length; i++)
+          ChoiceChip(
+            label: Text(Avatar.hairStyles[i].name),
+            selected: _avatar.hair == i,
+            onSelected: (_) => _set(_avatar.copyWith(hair: i)),
+            selectedColor: AppTheme.neonGreen,
+            backgroundColor: AppTheme.cardBg,
+            showCheckmark: false,
+            labelStyle: TextStyle(
+                color: _avatar.hair == i ? Colors.black : AppTheme.textSecondary,
+                fontWeight: FontWeight.w600),
           ),
-        ),
-        SizedBox(
-          width: 52,
-          child: Text(high,
-              textAlign: TextAlign.right,
-              style: const TextStyle(color: AppTheme.textMuted, fontSize: 11)),
-        ),
       ]),
     ]);
   }

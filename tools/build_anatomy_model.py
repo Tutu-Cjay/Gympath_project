@@ -49,11 +49,12 @@ SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 # Muscles are pushed out along their normals by this much (m): the raw scans
 # sit well inside the skin and read thin through it.
 MUSCLE_INFLATE = 0.0035
-# Avatar shape keys (morph targets the app blends 0..1):
-#   Muscular: muscles grow by up to MUSCULAR_MAX, the skin over them follows.
-#   BodyFat:  the skin grows by up to BODYFAT_MAX, most on belly, hips, thighs.
-MUSCULAR_MAX = 0.014
-BODYFAT_MAX = 0.036
+# Avatar hair: caps over the scalp, shown one at a time by the app.
+HAIR_STYLES = {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)}  # base, extra on top (m)
+# The solid head fades into the see-through body over the neck: this many
+# bands (materials neck1..neckN, each a bit more solid) over NECK_FADE metres.
+NECK_BANDS = 8
+NECK_FADE = 0.085
 
 # Muscle groups the app can highlight: material name -> name pattern.
 GROUPS = [
@@ -166,7 +167,8 @@ STACK_TRAVEL = 0.32          # how far the weight stack rises at full contractio
 STACK_BASE, STACK_HEIGHT = 0.10, 0.36
 PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
               "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b"]
-STATIC_MATERIALS = ["skin", "head", "shorts", "equipment", "cable", "tracker", "pad"]
+STATIC_MATERIALS = (["skin"] + [f"neck{i}" for i in range(1, NECK_BANDS + 1)]
+                    + ["head"] + list(HAIR_STYLES) + ["shorts", "equipment", "cable", "tracker", "pad"])
 
 
 # ----------------------------------------------------------------- data ----
@@ -476,9 +478,31 @@ def vertex_normals(v, f):
 _neck_cut = C7[2] + 0.55 * (C1[2] - C7[2])
 parts = [p for p in parts
          if not (p["verts"][:, 2].mean() > _neck_cut and abs(p["verts"][:, 0].mean()) < 0.14)]
+# Near the head the skin is thin and fades to solid: muscles there are not
+# inflated but pulled slightly in (so they never poke through), and whatever
+# lies under the solid head is dropped.
+_fade_bottom = _neck_cut - NECK_FADE
+
+
+def neck_fade(z):
+    """1 below the neck fade, 0 from its middle up."""
+    return np.clip((_fade_bottom + NECK_FADE * 0.5 - z) / (NECK_FADE * 0.5), 0, 1)
+
+
+for p in parts:
+    v, f = p["verts"], p["faces"]
+    keep_f = ~(v[f][:, :, 2] > _neck_cut).all(axis=1)
+    if not keep_f.all():
+        used = np.unique(f[keep_f])
+        remap = -np.ones(len(v), int)
+        remap[used] = np.arange(len(used))
+        p["verts"], p["faces"] = v[used], remap[f[keep_f]]
+parts = [p for p in parts if len(p["faces"]) >= 4]
 for p in parts:
     p["normals"] = vertex_normals(p["verts"], p["faces"])
-    p["verts"] = p["verts"] + p["normals"] * MUSCLE_INFLATE
+    p["fade"] = neck_fade(p["verts"][:, 2])
+    push = MUSCLE_INFLATE * p["fade"] - 0.004 * (1 - p["fade"])
+    p["verts"] = p["verts"] + p["normals"] * push[:, None]
 
 material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
 all_verts, all_faces, all_mats, all_w = [], [], [], []
@@ -516,7 +540,9 @@ hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
 hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
 # Head: opaque, from just under the jaw up.
 neck_z = C7[2] + 0.55 * (C1[2] - C7[2])
-skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"], (hem_z, waist_z, neck_z))
+neck_cuts = [neck_z - NECK_FADE * i / NECK_BANDS for i in range(1, NECK_BANDS + 1)]
+skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"],
+                                        (hem_z, waist_z, neck_z, *neck_cuts))
 # Give the shorts a plain front panel: pull the middle of the front onto one
 # smooth plane just ahead of the thighs, fading out to the sides and the waist.
 sv = skin["verts"]
@@ -549,20 +575,20 @@ head = (centre[:, 2] > neck_z) & (np.abs(centre[:, 0]) < 0.14)
 skin_mat = np.full(len(skin["faces"]), material_names.index("skin"))
 skin_mat[shorts] = material_names.index("shorts")
 skin_mat[head] = material_names.index("head")
+# Neck bands: band 1 sits just under the head (most solid), band N lowest.
+near_neck = (np.abs(centre[:, 0]) < 0.14) & ~head & ~shorts
+for i in range(1, NECK_BANDS + 1):
+    lo, hi = neck_z - NECK_FADE * i / NECK_BANDS, neck_z - NECK_FADE * (i - 1) / NECK_BANDS
+    band = near_neck & (centre[:, 2] > lo) & (centre[:, 2] <= hi)
+    skin_mat[band] = material_names.index(f"neck{i}")
 all_mats.append(skin_mat)
 all_w.append(skin_w)
 skin_range = (offset, offset + len(skin["verts"]))
 offset += len(skin["verts"])
 
-# --- avatar shape keys ------------------------------------------------------
-muscle_end = skin_range[0]                     # muscles are the first vertices
-muscle_n = np.concatenate([p["normals"] for p in parts])
-skin_n = vertex_normals(skin["verts"], skin["faces"])
-
-
+# --- avatar hair ------------------------------------------------------------
 def smooth_field(field, faces, n_verts, rounds):
-    """Average a per-vertex field with its mesh neighbours a few times, so a
-    displacement along it bulges smoothly instead of crumpling the surface."""
+    """Average a per-vertex field with its mesh neighbours a few times."""
     from scipy.sparse import coo_matrix, identity
     i = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2], faces[:, 1], faces[:, 2], faces[:, 0]])
     j = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0], faces[:, 0], faces[:, 1], faces[:, 2]])
@@ -575,28 +601,33 @@ def smooth_field(field, faces, n_verts, rounds):
     return field
 
 
-skin_n = smooth_field(skin_n, skin["faces"], len(skin["verts"]), 12)
-skin_n /= np.maximum(np.linalg.norm(skin_n, axis=1, keepdims=True), 1e-12)
-on_head = np.zeros(len(skin["verts"]), bool)
-on_head[np.unique(skin["faces"][head])] = True
-# Skin follows the muscles only where muscle lies close under it.
-muscle_pts = np.concatenate([p["verts"] for p in parts])
-gap, _ = cKDTree(muscle_pts).query(skin["verts"])
-follow = np.clip(1 - (gap - 0.006) / 0.03, 0, 1) * ~on_head
-# Where fat goes: belly and hips most, then thighs, chest, arms; little else.
-FAT = {"pelvis": 1.0, "spine_01": 1.0, "spine_02": 0.75, "spine_03": 0.35,
-       "thigh_l": 0.7, "thigh_r": 0.7, "upperarm_l": 0.45, "upperarm_r": 0.45,
-       "calf_l": 0.25, "calf_r": 0.25, "lowerarm_l": 0.15, "lowerarm_r": 0.15,
-       "neck": 0.25, "head": 0.08}
-fat_w = np.zeros(len(BONE_NAMES))
-for b, w in FAT.items():
-    fat_w[BONE_NAMES.index(b)] = w
-fatness = smooth_field(skin_w @ fat_w, skin["faces"], len(skin["verts"]), 8)
-shape_muscular = np.zeros((offset, 3))
-shape_muscular[:muscle_end] = muscle_n * MUSCULAR_MAX
-shape_muscular[skin_range[0]:skin_range[1]] = skin_n * (MUSCULAR_MAX * follow)[:, None]
-shape_fat = np.zeros((offset, 3))
-shape_fat[skin_range[0]:skin_range[1]] = skin_n * (BODYFAT_MAX * fatness)[:, None]
+# Scalp: head skin above a hairline that runs from the forehead down to the
+# nape. Each style is a copy of it pushed out along the (smoothed) normals,
+# thinning to nothing at the hairline so the edge blends into the skin.
+head_faces = skin["faces"][head]
+head_v = np.unique(head_faces)
+hv = skin["verts"]
+top_z = hv[head_v, 2].max()
+front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
+along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
+hairline = (top_z - 0.085) + ((C1[2] + 0.005) - (top_z - 0.085)) * along ** 1.15
+above = hv[:, 2] - hairline
+scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
+scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
+scalp_n /= np.maximum(np.linalg.norm(scalp_n, axis=1, keepdims=True), 1e-12)
+taper = np.clip(above / 0.03, 0, 1)
+taper = taper * taper * (3 - 2 * taper)
+on_top = np.clip(above / 0.08, 0, 1)
+for style, (base, extra) in HAIR_STYLES.items():
+    used = np.unique(scalp_faces)
+    remap = -np.ones(len(hv), int)
+    remap[used] = np.arange(len(used))
+    lift = (base + extra * on_top[used]) * taper[used] + 0.0008
+    all_verts.append(hv[used] + scalp_n[used] * lift[:, None])
+    all_faces.append(remap[scalp_faces] + offset)
+    all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
+    all_w.append(skin_w[used])
+    offset += len(used)
 
 
 # ---------------------------------------------------------------- props ----
@@ -662,10 +693,6 @@ for bone, mat, (pv, pf) in PROPS:
     offset += len(pv)
 
 V = np.concatenate(all_verts)
-SHAPES = {"Muscular": shape_muscular, "BodyFat": shape_fat}
-for key in SHAPES:
-    pad = np.zeros((len(V) - len(SHAPES[key]), 3))
-    SHAPES[key] = np.concatenate([SHAPES[key], pad])
 F = np.concatenate(all_faces)
 MAT = np.concatenate(all_mats)
 W = np.concatenate(all_w)
@@ -698,7 +725,12 @@ for name in material_names:
         bsdf.inputs["Emission Strength"].default_value = 1.5
     if name == "head":
         bsdf.inputs["Base Color"].default_value = SKIN_COLOR[:3] + (1.0,)
-    if name == "skin":
+    if name in HAIR_STYLES:
+        bsdf.inputs["Base Color"].default_value = (0.02, 0.018, 0.016, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.9
+    if name.startswith("neck"):
+        bsdf.inputs["Base Color"].default_value = SKIN_COLOR
+    if name == "skin" or name.startswith("neck"):
         bsdf.inputs["Alpha"].default_value = SKIN_COLOR[3]
         if hasattr(m, "surface_render_method"):
             m.surface_render_method = "BLENDED"
@@ -709,11 +741,6 @@ for name in material_names:
 
 body = bpy.data.objects.new("Anatomy", mesh)
 scene.collection.objects.link(body)
-body.shape_key_add(name="Basis", from_mix=False)
-for key, delta in SHAPES.items():
-    sk = body.shape_key_add(name=key, from_mix=False)
-    sk.data.foreach_set("co", (V + delta).astype(np.float32).ravel())
-    sk.value = 0.0
 
 arm_data = bpy.data.armatures.new("Rig")
 arm = bpy.data.objects.new("Rig", arm_data)
@@ -942,9 +969,7 @@ bpy.ops.export_scene.gltf(
     export_animations=True,
     export_animation_mode="NLA_TRACKS",
     export_skins=True,
-    export_morph=True,
-    export_morph_normal=False,
-    export_morph_tangent=False,
+    export_morph=False,
     export_cameras=False,
     export_lights=False,
 )
