@@ -53,7 +53,7 @@ MUSCLE_INFLATE = 0.0035
 #   Muscular: muscles grow by up to MUSCULAR_MAX, the skin over them follows.
 #   BodyFat:  the skin grows by up to BODYFAT_MAX, most on belly, hips, thighs.
 MUSCULAR_MAX = 0.014
-BODYFAT_MAX = 0.042
+BODYFAT_MAX = 0.036
 
 # Muscle groups the app can highlight: material name -> name pattern.
 GROUPS = [
@@ -558,6 +558,25 @@ offset += len(skin["verts"])
 muscle_end = skin_range[0]                     # muscles are the first vertices
 muscle_n = np.concatenate([p["normals"] for p in parts])
 skin_n = vertex_normals(skin["verts"], skin["faces"])
+
+
+def smooth_field(field, faces, n_verts, rounds):
+    """Average a per-vertex field with its mesh neighbours a few times, so a
+    displacement along it bulges smoothly instead of crumpling the surface."""
+    from scipy.sparse import coo_matrix, identity
+    i = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2], faces[:, 1], faces[:, 2], faces[:, 0]])
+    j = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0], faces[:, 0], faces[:, 1], faces[:, 2]])
+    adj = coo_matrix((np.ones(len(i)), (i, j)), shape=(n_verts, n_verts)).tocsr()
+    adj.data[:] = 1.0
+    adj = adj + identity(n_verts, format="csr")
+    deg = np.asarray(adj.sum(axis=1)).ravel()
+    for _ in range(rounds):
+        field = adj @ field / (deg[:, None] if field.ndim == 2 else deg)
+    return field
+
+
+skin_n = smooth_field(skin_n, skin["faces"], len(skin["verts"]), 12)
+skin_n /= np.maximum(np.linalg.norm(skin_n, axis=1, keepdims=True), 1e-12)
 on_head = np.zeros(len(skin["verts"]), bool)
 on_head[np.unique(skin["faces"][head])] = True
 # Skin follows the muscles only where muscle lies close under it.
@@ -572,7 +591,7 @@ FAT = {"pelvis": 1.0, "spine_01": 1.0, "spine_02": 0.75, "spine_03": 0.35,
 fat_w = np.zeros(len(BONE_NAMES))
 for b, w in FAT.items():
     fat_w[BONE_NAMES.index(b)] = w
-fatness = skin_w @ fat_w
+fatness = smooth_field(skin_w @ fat_w, skin["faces"], len(skin["verts"]), 8)
 shape_muscular = np.zeros((offset, 3))
 shape_muscular[:muscle_end] = muscle_n * MUSCULAR_MAX
 shape_muscular[skin_range[0]:skin_range[1]] = skin_n * (MUSCULAR_MAX * follow)[:, None]
