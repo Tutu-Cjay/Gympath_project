@@ -29,4 +29,5 @@ flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
-    - assets/models/anatomy_cable.glb
+    - assets/models/anatomy_male.glb
+    - assets/models/anatomy_female.glb

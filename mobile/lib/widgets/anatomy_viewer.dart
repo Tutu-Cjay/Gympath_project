@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:model_viewer_plus/model_viewer_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
@@ -41,6 +42,8 @@ class AnatomyViewerController {
   void seek(double t) => _run('seek($t)');
 
   void setOrbit(String orbit) => _run('orbit(${jsonEncode(orbit)})');
+  void setCamera(String orbit, String target) =>
+      _run('camera(${jsonEncode(orbit)}, ${jsonEncode(target)})');
   void resetCamera() {
     final e = _exercise;
     if (e != null) _run('camera(${jsonEncode(e.cameraOrbit)}, ${jsonEncode(e.cameraTarget)})');
@@ -76,7 +79,7 @@ class AnatomyViewerController {
 
 /// 3D figure performing a cable exercise, with the working muscles tinted.
 ///
-/// The model (`assets/models/anatomy_cable.glb`, built by
+/// The model (`assets/models/anatomy_<sex>.glb`, built by
 /// tools/build_anatomy_model.py) holds skin over real muscle shapes plus the
 /// machine: seat, handle, cables, pulleys and the weight stack with the
 /// tracker on it. Each exercise is one animation clip.
@@ -100,7 +103,12 @@ class AnatomyViewer extends StatefulWidget {
     this.initialOrbit,
     this.initialTarget,
     this.initialFieldOfView,
+    this.avatar,
   });
+
+  /// Avatar to show; defaults to the saved one (AvatarStore). The avatar
+  /// editor passes its unsaved draft here for a live preview.
+  final ValueListenable<Avatar>? avatar;
 
   static const Color background = Color(0xFF12171A);
 
@@ -109,20 +117,30 @@ class AnatomyViewer extends StatefulWidget {
 }
 
 class _AnatomyViewerState extends State<AnatomyViewer> {
-  static const String _modelAsset = 'assets/models/anatomy_cable.glb';
-  late final Widget _viewer;
+  late Widget _viewer;
+  late AvatarSex _sex;
+
+  ValueListenable<Avatar> get _avatar =>
+      widget.avatar ?? AvatarStore.instance.avatar;
 
   @override
   void initState() {
     super.initState();
-    final e = widget.exercise;
-    widget.controller._exercise = e;
-    AvatarStore.instance.avatar.addListener(_onAvatar);
-    // Built once: rebuilding ModelViewer with new arguments would reload the
-    // whole model. Everything after this goes through JavaScript.
-    _viewer = ModelViewer(
+    widget.controller._exercise = widget.exercise;
+    _avatar.addListener(_onAvatar);
+    _sex = _avatar.value.sex;
+    _viewer = _build();
+  }
+
+  /// One model per sex (assets/models/anatomy_<sex>.glb). The ModelViewer is
+  /// built once per model: rebuilding it with new arguments would reload the
+  /// whole model, so everything else goes through JavaScript.
+  Widget _build() {
+    final e = widget.controller._exercise ?? widget.exercise;
+    return ModelViewer(
+      key: ValueKey(_sex),
       id: 'gp',
-      src: _modelAsset,
+      src: 'assets/models/anatomy_${_sex.name}.glb',
       alt: 'Figure performing a cable exercise',
       backgroundColor: AnatomyViewer.background,
       loading: Loading.eager,
@@ -140,7 +158,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       shadowIntensity: 0.7,
       shadowSoftness: 0.9,
       debugLogging: false,
-      relatedJs: _script(e, AvatarStore.instance.avatar.value.toJs()),
+      relatedJs: _script(e, _avatar.value.toJs()),
       javascriptChannels: {
         JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
       },
@@ -148,11 +166,23 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     );
   }
 
-  void _onAvatar() => widget.controller.setAvatar(AvatarStore.instance.avatar.value);
+  void _onAvatar() {
+    final a = _avatar.value;
+    if (a.sex != _sex) {
+      // The other body: load its model.
+      widget.onStatus?.call(0, false);
+      setState(() {
+        _sex = a.sex;
+        _viewer = _build();
+      });
+    } else {
+      widget.controller.setAvatar(a);
+    }
+  }
 
   @override
   void dispose() {
-    AvatarStore.instance.avatar.removeListener(_onAvatar);
+    _avatar.removeListener(_onAvatar);
     super.dispose();
   }
 
@@ -174,18 +204,25 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   // Resting muscles: grey under the skin, anatomical red with the skin off.
   const UNDER_SKIN = [0.42, 0.43, 0.46];
   const BARE = [0.42, 0.22, 0.20];
-  // The body is the same for everyone: see-through graphite skin over a
-  // normal build. Only the head is the user's avatar: skin tone and hair.
+  // The body is the same for everyone of a sex: see-through graphite skin
+  // over a normal build. The head is the user's avatar.
   const BODY_SKIN = [0.30, 0.32, 0.36];
   const BODY_ALPHA = 0.49;
   const SHORTS = [0.05, 0.05, 0.06];
   let avatar = ${jsonEncode(avatar)};
-  // Materials that are not muscles: body surface, clothing and the machine.
-  const DRESS = ['skin', 'head', 'shorts', 'hair_buzz', 'hair_short'];
+  // Materials that are not muscles: body surface, clothing, the avatar's
+  // face parts and the machine.
+  const DRESS = ['skin', 'head', 'shorts', 'iris', 'lips'];
+  // One of each group is shown (the avatar's choice), coloured from it.
+  const OPTIONS = ['hair_', 'brows_', 'beard_', 'glasses_'];
+  function option(n) {
+    for (const p of OPTIONS) if (n.indexOf(p) === 0) return p;
+    return null;
+  }
   // Neck bands between the see-through body and the solid head (neck1 just
   // under the head ... neckN lowest); each is a step more solid.
   const NECK_BANDS = 8;
-  const FIXED = ['shorts', 'equipment', 'cable', 'tracker', 'pad'];
+  const FIXED = ['shorts', 'equipment', 'cable', 'tracker', 'pad', 'sclera', 'pupil', 'lashes'];
   const PRIMARY = [0.0, 1.0, 0.53];
   const SECONDARY = [1.0, 0.72, 0.20];
   const PULL = ${RepTimeline.pullStart}, HOLD = ${RepTimeline.holdStart};
@@ -202,6 +239,32 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   // Live mode: the figure eases towards the progress the tracker reports.
   let live = false, target = 0, shown = 0, lastFrame = 0;
 
+  function mix(a, b, t) {
+    return [0, 1, 2].map(function (i) { return a[i] + (b[i] - a[i]) * t; });
+  }
+  // Face shape: a morph target of the head. model-viewer has no API for
+  // morph targets, so this reaches into its three.js scene; if that ever
+  // fails the head keeps its default (oval) shape.
+  const FACE_SHAPES = ['FaceRound', 'FaceSquare', 'FaceLong', 'FaceHeart'];
+  function applyFace() {
+    try {
+      const sym = Object.getOwnPropertySymbols(mv).find(function (s) {
+        return s.description === 'scene';
+      });
+      const scene = sym ? mv[sym] : null;
+      if (!scene || !scene.traverse) return;
+      scene.traverse(function (o) {
+        const dict = o.morphTargetDictionary;
+        if (!dict || !o.morphTargetInfluences) return;
+        for (const name of FACE_SHAPES) {
+          if (dict[name] !== undefined) {
+            o.morphTargetInfluences[dict[name]] = avatar.face === name ? 1 : 0;
+          }
+        }
+      });
+      if (scene.queueRender) scene.queueRender();
+    } catch (e) { /* keep the default face */ }
+  }
   function smooth(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
   function contraction(t) {
     if (t < PULL) return 0;
@@ -228,12 +291,15 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     for (const m of mv.model.materials) {
       const n = m.name;
       const neck = n.indexOf('neck') === 0 ? parseInt(n.slice(4), 10) : 0;
-      if (DRESS.indexOf(n) >= 0 || neck > 0) {
+      const opt = option(n);
+      if (DRESS.indexOf(n) >= 0 || neck > 0 || opt) {
         if (dress) {
           let k = BODY_SKIN, a = 1;
           if (n === 'skin') a = skinAlpha;
           else if (n === 'shorts') k = SHORTS;
           else if (n === 'head') k = avatar.skin;
+          else if (n === 'iris') k = avatar.eyeColor;
+          else if (n === 'lips') k = mix(avatar.skin, [0.42, 0.12, 0.11], 0.33);
           else if (neck > 0) {
             // The neck blends the avatar's solid head into the body's
             // see-through skin: colour and opacity both, band by band.
@@ -244,9 +310,14 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
             });
             a = skinAlpha + (1 - skinAlpha) * f;
           } else {
-            // Hair: only the chosen style shows.
-            const on = n === avatar.hair;
+            // Hair, brows, beard, glasses: only the chosen one shows.
+            const chosen = { hair_: avatar.hair, brows_: avatar.brows,
+                             beard_: avatar.beard, glasses_: avatar.glasses }[opt];
+            const on = n === chosen;
             k = avatar.hairColor;
+            if (opt === 'brows_') k = mix(avatar.hairColor, [0, 0, 0], 0.25);
+            if (n === 'beard_stubble') k = mix(avatar.hairColor, avatar.skin, 0.45);
+            if (opt === 'glasses_') k = [0.02, 0.02, 0.025];
             a = on ? 1 : 0;
             m.setAlphaMode(on ? 'OPAQUE' : 'BLEND');
           }
@@ -312,6 +383,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     last = {};
     dressDirty = true;
     original = null;
+    applyFace();
     if (heat) machine(false);
     mv.animationName = cfg.animation;
     resume();
@@ -339,7 +411,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       dressDirty = true;
       last = {};
     },
-    avatar: function (a) { avatar = a; dressDirty = true; },
+    avatar: function (a) { avatar = a; dressDirty = true; applyFace(); },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
   };

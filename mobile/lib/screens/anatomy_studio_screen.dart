@@ -474,7 +474,8 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
           'shorten. They are a teaching map, not a measurement of your own '
           'muscle activity.\n\n'
           '3D anatomy: BodyParts3D, © The Database Center for Life Science, '
-          'licensed under CC Attribution-Share Alike 2.1 Japan.',
+          'licensed under CC Attribution-Share Alike 2.1 Japan. '
+          'Head and female body: MakeHuman (CC0).',
           style: TextStyle(color: Color(0xFFE5C98E), fontSize: 11),
         ),
       ),

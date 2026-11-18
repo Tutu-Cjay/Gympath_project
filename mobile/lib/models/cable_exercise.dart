@@ -1,7 +1,7 @@
 /// Cable-machine exercise guides for the Movement Studio.
 ///
 /// Each exercise names an animation baked into
-/// `assets/models/anatomy_cable.glb` and the muscle groups it trains. A group
+/// `assets/models/anatomy_male.glb` / `anatomy_female.glb` and the muscle groups it trains. A group
 /// id is the name of a material in that model (one material per muscle group,
 /// see tools/build_anatomy_model.py), so highlighting a group tints the real
 /// muscle geometry.
