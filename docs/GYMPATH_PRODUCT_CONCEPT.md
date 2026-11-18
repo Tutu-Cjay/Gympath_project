@@ -206,6 +206,7 @@ Wearable-ийн одоогийн firmware, BLE protocol, sensor calibration-ий
 - **Апп:** `AnatomyStudioScreen` (model_viewer_plus) — дасгал сонгох, эргүүлэх/zoom, play/pause, хурд, timeline, булчинг тусад нь харах, phase бүрийн cue. Workout жагсаалтын мөр бүрээс шууд нээгдэнэ.
 - **Дасгалын өгөгдөл:** `mobile/lib/models/cable_exercise.dart`.
 
+- **Avatar:** хэрэглэгч булчингийн хэмжээ, өөх, арьсны өнгө, шортны өнгө, булчин арьсаар хэр харагдахыг тохируулна (загварын `Muscular` / `BodyFat` morph target, `AvatarScreen`). Толгой тунгалаг биш; нүүрний булчингууд загварт ороогүй.
 - **Суух / зогсох байрлал ба тоног төхөөрөмж:** Lat Pulldown, Seated Cable Row суугаа, бусад нь зогсоо. Загварт суудал, бариул, cable, pulley, жингийн stack, түүн дээрх tracker орсон; stack нь агшилттай хамт өргөгдөнө.
 - **Tracker-ээс хөдөлгөөн сэргээх:** `CableTrackScreen`-ийн график 3D дүрсээр солигдсон. Tracker нь stack-ийн өндрийг л хэмждэг; `MotionReconstructor` тэр өндрийг хэрэглэгчийн өөрийн далайцад харьцуулж давталтын явц (0..1) болгон, дүрс, машин, булчингийн тодруулгыг түүгээр хөдөлгөнө. Start дарахаас өмнө дүрс заавар болж тоглоно.
 - **Simulation mode:** tracker байхгүй үед `Simulate` товч (`TrackSimulator`) firmware-тэй ижил sample гаргана. Simulation-ий сет хадгалагдахгүй.

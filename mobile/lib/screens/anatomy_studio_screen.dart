@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/cable_exercise.dart';
 import '../theme/app_theme.dart';
 import '../widgets/anatomy_viewer.dart';
+import 'avatar_screen.dart';
 import 'cable_track_screen.dart';
 
 /// Movement Studio: 3D muscle guide for the cable-machine workouts.
@@ -97,6 +98,15 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
       appBar: AppBar(
         title: const Text('Movement Studio'),
         automaticallyImplyLeading: !widget.embedded,
+        actions: [
+          IconButton(
+            tooltip: 'Your avatar',
+            icon: const Icon(Icons.face_retouching_natural_rounded),
+            color: AppTheme.neonGreen,
+            onPressed: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => const AvatarScreen())),
+          ),
+        ],
       ),
       body: SafeArea(
         child: LayoutBuilder(

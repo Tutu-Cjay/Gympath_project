@@ -46,6 +46,15 @@ MUSCLE_COLOR = (0.42, 0.43, 0.46, 1.0)   # resting muscles blend into the skin
 SKIN_COLOR = (0.30, 0.31, 0.35, 0.45)    # alpha: how much muscle shows through
 SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 
+# Muscles are pushed out along their normals by this much (m): the raw scans
+# sit well inside the skin and read thin through it.
+MUSCLE_INFLATE = 0.0035
+# Avatar shape keys (morph targets the app blends 0..1):
+#   Muscular: muscles grow by up to MUSCULAR_MAX, the skin over them follows.
+#   BodyFat:  the skin grows by up to BODYFAT_MAX, most on belly, hips, thighs.
+MUSCULAR_MAX = 0.014
+BODYFAT_MAX = 0.042
+
 # Muscle groups the app can highlight: material name -> name pattern.
 GROUPS = [
     ("lats", r"latissimus dorsi|teres major"),
@@ -157,7 +166,7 @@ STACK_TRAVEL = 0.32          # how far the weight stack rises at full contractio
 STACK_BASE, STACK_HEIGHT = 0.10, 0.36
 PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
               "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b"]
-STATIC_MATERIALS = ["skin", "shorts", "equipment", "cable", "tracker", "pad"]
+STATIC_MATERIALS = ["skin", "head", "shorts", "equipment", "cable", "tracker", "pad"]
 
 
 # ----------------------------------------------------------------- data ----
@@ -450,6 +459,27 @@ def group_of(part):
 scene = bpy.context.scene
 scene.render.fps = FPS
 
+def vertex_normals(v, f):
+    """Area-weighted vertex normals, flipped to point away from the centroid."""
+    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    n = np.zeros_like(v)
+    for k in range(3):
+        np.add.at(n, f[:, k], fn)
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    if ((v - v.mean(axis=0)) * n).sum() < 0:
+        n = -n
+    return n
+
+
+# The head is drawn solid, so the face and scalp muscles are never seen; they
+# would only poke through the thin face skin once inflated.
+_neck_cut = C7[2] + 0.55 * (C1[2] - C7[2])
+parts = [p for p in parts
+         if not (p["verts"][:, 2].mean() > _neck_cut and abs(p["verts"][:, 0].mean()) < 0.14)]
+for p in parts:
+    p["normals"] = vertex_normals(p["verts"], p["faces"])
+    p["verts"] = p["verts"] + p["normals"] * MUSCLE_INFLATE
+
 material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
 all_verts, all_faces, all_mats, all_w = [], [], [], []
 offset = 0
@@ -484,7 +514,9 @@ def slice_at(verts, faces, heights):
 # Shorts: the band of skin between mid-thigh and the waist, as its own material.
 hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
 hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
-skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"], (hem_z, waist_z))
+# Head: opaque, from just under the jaw up.
+neck_z = C7[2] + 0.55 * (C1[2] - C7[2])
+skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"], (hem_z, waist_z, neck_z))
 # Give the shorts a plain front panel: pull the middle of the front onto one
 # smooth plane just ahead of the thighs, fading out to the sides and the waist.
 sv = skin["verts"]
@@ -513,9 +545,39 @@ lower = [BONE_NAMES.index(b) for b in ("pelvis", "spine_01", "thigh_l", "thigh_r
 centre = skin["verts"][skin["faces"]].mean(axis=1)
 on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
 shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
-all_mats.append(np.where(shorts, material_names.index("shorts"), material_names.index("skin")))
+head = (centre[:, 2] > neck_z) & (np.abs(centre[:, 0]) < 0.14)
+skin_mat = np.full(len(skin["faces"]), material_names.index("skin"))
+skin_mat[shorts] = material_names.index("shorts")
+skin_mat[head] = material_names.index("head")
+all_mats.append(skin_mat)
 all_w.append(skin_w)
+skin_range = (offset, offset + len(skin["verts"]))
 offset += len(skin["verts"])
+
+# --- avatar shape keys ------------------------------------------------------
+muscle_end = skin_range[0]                     # muscles are the first vertices
+muscle_n = np.concatenate([p["normals"] for p in parts])
+skin_n = vertex_normals(skin["verts"], skin["faces"])
+on_head = np.zeros(len(skin["verts"]), bool)
+on_head[np.unique(skin["faces"][head])] = True
+# Skin follows the muscles only where muscle lies close under it.
+muscle_pts = np.concatenate([p["verts"] for p in parts])
+gap, _ = cKDTree(muscle_pts).query(skin["verts"])
+follow = np.clip(1 - (gap - 0.006) / 0.03, 0, 1) * ~on_head
+# Where fat goes: belly and hips most, then thighs, chest, arms; little else.
+FAT = {"pelvis": 1.0, "spine_01": 1.0, "spine_02": 0.75, "spine_03": 0.35,
+       "thigh_l": 0.7, "thigh_r": 0.7, "upperarm_l": 0.45, "upperarm_r": 0.45,
+       "calf_l": 0.25, "calf_r": 0.25, "lowerarm_l": 0.15, "lowerarm_r": 0.15,
+       "neck": 0.25, "head": 0.08}
+fat_w = np.zeros(len(BONE_NAMES))
+for b, w in FAT.items():
+    fat_w[BONE_NAMES.index(b)] = w
+fatness = skin_w @ fat_w
+shape_muscular = np.zeros((offset, 3))
+shape_muscular[:muscle_end] = muscle_n * MUSCULAR_MAX
+shape_muscular[skin_range[0]:skin_range[1]] = skin_n * (MUSCULAR_MAX * follow)[:, None]
+shape_fat = np.zeros((offset, 3))
+shape_fat[skin_range[0]:skin_range[1]] = skin_n * (BODYFAT_MAX * fatness)[:, None]
 
 
 # ---------------------------------------------------------------- props ----
@@ -581,6 +643,10 @@ for bone, mat, (pv, pf) in PROPS:
     offset += len(pv)
 
 V = np.concatenate(all_verts)
+SHAPES = {"Muscular": shape_muscular, "BodyFat": shape_fat}
+for key in SHAPES:
+    pad = np.zeros((len(V) - len(SHAPES[key]), 3))
+    SHAPES[key] = np.concatenate([SHAPES[key], pad])
 F = np.concatenate(all_faces)
 MAT = np.concatenate(all_mats)
 W = np.concatenate(all_w)
@@ -611,6 +677,8 @@ for name in material_names:
     if name == "tracker":
         bsdf.inputs["Emission Color"].default_value = (0.0, 1.0, 0.53, 1.0)
         bsdf.inputs["Emission Strength"].default_value = 1.5
+    if name == "head":
+        bsdf.inputs["Base Color"].default_value = SKIN_COLOR[:3] + (1.0,)
     if name == "skin":
         bsdf.inputs["Alpha"].default_value = SKIN_COLOR[3]
         if hasattr(m, "surface_render_method"):
@@ -622,6 +690,11 @@ for name in material_names:
 
 body = bpy.data.objects.new("Anatomy", mesh)
 scene.collection.objects.link(body)
+body.shape_key_add(name="Basis", from_mix=False)
+for key, delta in SHAPES.items():
+    sk = body.shape_key_add(name=key, from_mix=False)
+    sk.data.foreach_set("co", (V + delta).astype(np.float32).ravel())
+    sk.value = 0.0
 
 arm_data = bpy.data.armatures.new("Rig")
 arm = bpy.data.objects.new("Rig", arm_data)
@@ -850,7 +923,9 @@ bpy.ops.export_scene.gltf(
     export_animations=True,
     export_animation_mode="NLA_TRACKS",
     export_skins=True,
-    export_morph=False,
+    export_morph=True,
+    export_morph_normal=False,
+    export_morph_tangent=False,
     export_cameras=False,
     export_lights=False,
 )

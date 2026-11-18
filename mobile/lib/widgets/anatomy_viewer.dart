@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:model_viewer_plus/model_viewer_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
 
+import '../models/avatar.dart';
 import '../models/cable_exercise.dart';
+import '../services/avatar_store.dart';
 
 /// Drives an [AnatomyViewer]: which exercise is shown, how it plays, and (in
 /// live mode) which point of the repetition the figure is at.
@@ -47,6 +49,10 @@ class AnatomyViewerController {
   /// Show only one muscle group at full strength (null = all).
   void setFocus(String? group) => _run('focus(${jsonEncode(group)})');
   void setSkin(bool on) => _run('skin($on)');
+
+  /// Apply an avatar (build, skin tone, shorts, see-through). The viewer
+  /// already follows the saved avatar; this is for live previews.
+  void setAvatar(Avatar a) => _run('avatar(${jsonEncode(a.toJs())})');
 
   /// Heat-map mode: every muscle group is tinted by its value (0..1) instead
   /// of by the exercise, and the machine is hidden; null switches back.
@@ -109,6 +115,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     super.initState();
     final e = widget.exercise;
     widget.controller._exercise = e;
+    AvatarStore.instance.avatar.addListener(_onAvatar);
     // Built once: rebuilding ModelViewer with new arguments would reload the
     // whole model. Everything after this goes through JavaScript.
     _viewer = ModelViewer(
@@ -131,12 +138,20 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       shadowIntensity: 0.7,
       shadowSoftness: 0.9,
       debugLogging: false,
-      relatedJs: _script(e),
+      relatedJs: _script(e, AvatarStore.instance.avatar.value.toJs()),
       javascriptChannels: {
         JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
       },
       onWebViewCreated: (c) => widget.controller._web = c,
     );
+  }
+
+  void _onAvatar() => widget.controller.setAvatar(AvatarStore.instance.avatar.value);
+
+  @override
+  void dispose() {
+    AvatarStore.instance.avatar.removeListener(_onAvatar);
+    super.dispose();
   }
 
   void _onMessage(String raw) {
@@ -151,22 +166,31 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
 
   /// Page script: tints the muscle materials every frame from the rep time and
   /// reports that time back. The timeline numbers mirror [RepTimeline].
-  static String _script(CableExercise initial) => '''
+  static String _script(CableExercise initial, Map<String, Object> avatar) => '''
 (function () {
   const mv = document.querySelector('#gp');
   // Resting muscles: grey under the skin, anatomical red with the skin off.
   const UNDER_SKIN = [0.42, 0.43, 0.46];
   const BARE = [0.42, 0.22, 0.20];
-  const SKIN = [0.30, 0.31, 0.35];
-  const SKIN_ALPHA = 0.45;
-  // Materials that are not muscles: clothing and the machine.
+  // The user's avatar: skin tone, shorts, how see-through the skin is, and
+  // the Muscular / BodyFat shape keys (morph targets) of the model.
+  let avatar = ${jsonEncode(avatar)};
+  // Materials that are not muscles: body surface, clothing and the machine.
+  const DRESS = ['skin', 'head', 'shorts'];
   const FIXED = ['shorts', 'equipment', 'cable', 'tracker', 'pad'];
   const PRIMARY = [0.0, 1.0, 0.53];
   const SECONDARY = [1.0, 0.72, 0.20];
   const PULL = ${RepTimeline.pullStart}, HOLD = ${RepTimeline.holdStart};
   const RETURN = ${RepTimeline.returnStart}, REST = ${RepTimeline.restStart};
   let cfg = ${jsonEncode(AnatomyViewerController._config(initial))};
-  let BASE = UNDER_SKIN, skinAlpha = SKIN_ALPHA, skinDirty = true;
+  // Resting muscles under the skin take on the skin tone, so the body and
+  // the solid head read as one colour.
+  function underSkin() {
+    return [0, 1, 2].map(function (i) {
+      return avatar.skin[i] * 0.7 + UNDER_SKIN[i] * 0.3;
+    });
+  }
+  let BASE = underSkin(), skinOn = true, dressDirty = true;
   let focus = null, last = {}, lastSent = 0, paused = false, heat = null;
   // Live mode: the figure eases towards the progress the tracker reports.
   let live = false, target = 0, shown = 0, lastFrame = 0;
@@ -191,12 +215,17 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   function paint() {
     if (!mv.model) return;
     const c = contraction(repTime());
+    const skinAlpha = skinOn ? avatar.skinAlpha : 0;
+    const dress = dressDirty;
+    dressDirty = false;
     for (const m of mv.model.materials) {
       const n = m.name;
-      if (n === 'skin') {
-        if (skinDirty) {
-          skinDirty = false;
-          m.pbrMetallicRoughness.setBaseColorFactor([SKIN[0], SKIN[1], SKIN[2], skinAlpha]);
+      if (DRESS.indexOf(n) >= 0) {
+        if (dress) {
+          const k = n === 'shorts' ? avatar.shorts : avatar.skin;
+          // The head stays solid, so the figure keeps a face.
+          const a = n === 'skin' ? skinAlpha : 1;
+          m.pbrMetallicRoughness.setBaseColorFactor([k[0], k[1], k[2], a]);
         }
         continue;
       }
@@ -219,6 +248,31 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
     }
   }
+  // Blend the avatar's shape keys. model-viewer has no API for morph targets,
+  // so this reaches into its three.js scene; if that ever fails the figure
+  // simply keeps its default build.
+  function sceneOf() {
+    const sym = Object.getOwnPropertySymbols(mv).find(function (s) {
+      return s.description === 'scene';
+    });
+    return sym ? mv[sym] : null;
+  }
+  function applyShape() {
+    try {
+      const scene = sceneOf();
+      if (!scene || !scene.traverse) return;
+      const weights = { Muscular: avatar.muscle, BodyFat: avatar.fat };
+      scene.traverse(function (o) {
+        const dict = o.morphTargetDictionary;
+        if (!dict || !o.morphTargetInfluences) return;
+        for (const name in weights) {
+          if (dict[name] !== undefined) o.morphTargetInfluences[dict[name]] = weights[name];
+        }
+      });
+      if (scene.queueRender) scene.queueRender();
+    } catch (e) { /* keep the default build */ }
+  }
+
   // Show or hide the machine (everything but the body and the shorts).
   let original = null;
   function machine(on) {
@@ -256,8 +310,9 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   function resume() { if (live || paused) { mv.pause(); } else { mv.play(); } }
   mv.addEventListener('load', function () {
     last = {};
-    skinDirty = true;
+    dressDirty = true;
     original = null;
+    applyShape();
     if (heat) machine(false);
     mv.animationName = cfg.animation;
     resume();
@@ -280,10 +335,17 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     focus: function (g) { focus = g; last = {}; },
     heat: function (h) { heat = h; last = {}; machine(!h); },
     skin: function (on) {
-      skinAlpha = on ? SKIN_ALPHA : 0.0;
-      BASE = on ? UNDER_SKIN : BARE;
-      skinDirty = true;
+      skinOn = on;
+      BASE = on ? underSkin() : BARE;
+      dressDirty = true;
       last = {};
+    },
+    avatar: function (a) {
+      avatar = a;
+      if (skinOn) BASE = underSkin();
+      dressDirty = true;
+      last = {};
+      applyShape();
     },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }

@@ -7,6 +7,7 @@ import '../services/workout_store.dart';
 import 'choose_workout_screen.dart';
 import 'firmware_update_screen.dart';
 import 'anatomy_studio_screen.dart';
+import 'avatar_screen.dart';
 import 'progress_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -83,6 +84,17 @@ class _HomeTab extends StatelessWidget {
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              IconButton(
+                                tooltip: 'Your avatar',
+                                icon: const Icon(Icons.face_retouching_natural_rounded),
+                                color: AppTheme.neonGreen,
+                                onPressed: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const AvatarScreen(),
+                                  ),
+                                ),
+                              ),
                               IconButton(
                                 tooltip: 'Firmware update',
                                 icon: const Icon(Icons.system_update_rounded),
