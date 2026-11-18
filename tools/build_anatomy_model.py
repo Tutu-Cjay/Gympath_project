@@ -1,4 +1,4 @@
-"""Build the Movement Studio anatomy model (mobile/assets/models/anatomy_cable.glb).
+"""Build the Movement Studio anatomy model (mobile/assets/models/anatomy_<sex>.glb).
 
 Takes the real muscle shapes of BodyParts3D (one mesh per muscle) and its skin,
 rigs them to a simple skeleton and bakes one animation per cable exercise.
@@ -10,7 +10,12 @@ the working muscles show through in their real shape.
     pip install bpy numpy scipy
     git clone --depth 1 https://github.com/Kevin-Mattheus-Moerman/BodyParts3D
     python tools/build_anatomy_model.py BodyParts3D/assets/BodyParts3D_data \
-        mobile/assets/models/anatomy_cable.glb [preview_dir]
+        mobile/assets/models/anatomy_male.glb [preview_dir]
+    ANATOMY_SEX=female MPFB_DATA=mpfb2/src/mpfb/data python tools/build_anatomy_model.py \
+        BodyParts3D/assets/BodyParts3D_data mobile/assets/models/anatomy_female.glb
+
+The female body and head come from MakeHuman (MPFB2 data,
+CC0): see tools/real_head.py and tools/mh_body.py.
 
 Data: BodyParts3D, (c) The Database Center for Life Science, licensed under
 CC Attribution-Share Alike 2.1 Japan. The generated .glb is a derivative of
@@ -32,6 +37,12 @@ DATA = sys.argv[1]
 OUT = sys.argv[2]
 PREVIEW_DIR = sys.argv[3] if len(sys.argv) > 3 else None
 CACHE = os.environ.get("ANATOMY_CACHE")
+# ANATOMY_SEX=female builds the female figure; it needs MPFB_DATA, the
+# mpfb2/src/mpfb/data folder (CC0 MakeHuman data).
+SEX = os.environ.get("ANATOMY_SEX", "male")
+MPFB_DATA = os.environ.get("MPFB_DATA", "")
+if not MPFB_DATA:
+    sys.exit("MPFB_DATA must point at mpfb2/src/mpfb/data (the head is MakeHuman's)")
 
 FPS = 30
 REP_SECONDS = 4.0
@@ -49,8 +60,15 @@ SHORTS_COLOR = (0.05, 0.055, 0.065, 1.0)
 # Muscles are pushed out along their normals by this much (m): the raw scans
 # sit well inside the skin and read thin through it.
 MUSCLE_INFLATE = 0.0035
-# Avatar hair: caps over the scalp, shown one at a time by the app.
-HAIR_STYLES = {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)}  # base, extra on top (m)
+# Avatar head: eyes (the app colours the iris) and hair styles, shown one at a
+# time by the app. Male hair: caps over the scalp (base, extra on top, m);
+# female hair: shells from tools/real_head.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import real_head  # noqa: E402
+HAIR_STYLES = {"hair_buzz": (0.0025, 0.0), "hair_short": (0.006, 0.010)}
+FEMALE_HAIR = real_head.HAIR["female"]
+FACE_MATERIALS = (["sclera", "iris", "pupil", "lashes"]
+                  + (FEMALE_HAIR if SEX == "female" else list(HAIR_STYLES)))
 # The solid head fades into the see-through body over the neck: this many
 # bands (materials neck1..neckN, each a bit more solid) over NECK_FADE metres.
 NECK_BANDS = 8
@@ -168,7 +186,7 @@ STACK_BASE, STACK_HEIGHT = 0.10, 0.36
 PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
               "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b"]
 STATIC_MATERIALS = (["skin"] + [f"neck{i}" for i in range(1, NECK_BANDS + 1)]
-                    + ["head"] + list(HAIR_STYLES) + ["shorts", "equipment", "cable", "tracker", "pad"])
+                    + ["head"] + FACE_MATERIALS + ["shorts", "equipment", "cable", "tracker", "pad"])
 
 
 # ----------------------------------------------------------------- data ----
@@ -305,53 +323,178 @@ def centroid(name):
     return by_name[name]["verts"].mean(axis=0)
 
 
-J = {}
-for s, word in (("l", "left"), ("r", "right")):
-    J[f"shoulder_{s}"] = slab(f"{word} humerus", 0.90, 1.0)
-    J[f"elbow_{s}"] = slab(f"{word} humerus", 0.0, 0.05)
-    wrist_r, wrist_u = slab(f"{word} radius", 0.0, 0.05), slab(f"{word} ulna", 0.0, 0.05)
-    J[f"wrist_{s}"] = (wrist_r + wrist_u) / 2
-    femur = by_name[f"{word} femur"]["verts"]
-    top = femur[femur[:, 2] > femur[:, 2].max() - 0.05]
-    inner = top[np.argsort(np.abs(top[:, 0]))[: max(8, len(top) // 3)]]
-    J[f"hip_{s}"] = inner.mean(axis=0)
-    J[f"knee_{s}"] = slab(f"{word} femur", 0.0, 0.05)
-    J[f"ankle_{s}"] = slab(f"{word} tibia", 0.0, 0.04)
-    clav = by_name[f"{word} clavicle"]["verts"]
-    J[f"sternal_{s}"] = clav[np.argsort(np.abs(clav[:, 0]))[: max(8, len(clav) // 12)]].mean(axis=0)
-    scap = by_name[f"{word} scapula"]["verts"]
-    J[f"scap_{s}"] = scap.mean(axis=0)
-    J[f"scap_low_{s}"] = scap[np.argsort(scap[:, 2])[: max(8, len(scap) // 20)]].mean(axis=0)
+def compute_joints():
+    """Joint positions from the bone meshes (rest pose)."""
+    J = {}
+    for s, word in (("l", "left"), ("r", "right")):
+        J[f"shoulder_{s}"] = slab(f"{word} humerus", 0.90, 1.0)
+        J[f"elbow_{s}"] = slab(f"{word} humerus", 0.0, 0.05)
+        wrist_r, wrist_u = slab(f"{word} radius", 0.0, 0.05), slab(f"{word} ulna", 0.0, 0.05)
+        J[f"wrist_{s}"] = (wrist_r + wrist_u) / 2
+        femur = by_name[f"{word} femur"]["verts"]
+        top = femur[femur[:, 2] > femur[:, 2].max() - 0.05]
+        inner = top[np.argsort(np.abs(top[:, 0]))[: max(8, len(top) // 3)]]
+        J[f"hip_{s}"] = inner.mean(axis=0)
+        J[f"knee_{s}"] = slab(f"{word} femur", 0.0, 0.05)
+        J[f"ankle_{s}"] = slab(f"{word} tibia", 0.0, 0.04)
+        clav = by_name[f"{word} clavicle"]["verts"]
+        J[f"sternal_{s}"] = clav[np.argsort(np.abs(clav[:, 0]))[: max(8, len(clav) // 12)]].mean(axis=0)
+        scap = by_name[f"{word} scapula"]["verts"]
+        J[f"scap_{s}"] = scap.mean(axis=0)
+        J[f"scap_low_{s}"] = scap[np.argsort(scap[:, 2])[: max(8, len(scap) // 20)]].mean(axis=0)
 
-hand_bones = {"l": [], "r": []}
-foot_bones = {"l": [], "r": []}
-for p in under_parts:
-    if p["kind"] != "bone":
-        continue
-    c = p["verts"].mean(axis=0)
-    s = "l" if c[0] > 0 else "r"
-    if c[2] < J[f"wrist_{s}"][2] + 0.005 and np.linalg.norm(c - J[f"wrist_{s}"]) < 0.24 \
-            and abs(c[0]) > abs(J[f"hip_{s}"][0]) + 0.06:
-        hand_bones[s].append(p)
-    if c[2] < J[f"ankle_{s}"][2] + 0.01:
-        foot_bones[s].append(p)
-for s in "lr":
-    hv = np.concatenate([p["verts"] for p in hand_bones[s]])
-    J[f"handtip_{s}"] = hv[np.argsort(hv[:, 2])[: len(hv) // 10]].mean(axis=0)
-    fv = np.concatenate([p["verts"] for p in foot_bones[s]])
-    J[f"toe_{s}"] = fv[np.argsort(fv[:, 1])[: len(fv) // 12]].mean(axis=0)
-    J[f"heel_{s}"] = fv[np.argsort(-fv[:, 1])[: len(fv) // 12]].mean(axis=0)
+    hand_bones = {"l": [], "r": []}
+    foot_bones = {"l": [], "r": []}
+    for p in under_parts:
+        if p["kind"] != "bone":
+            continue
+        c = p["verts"].mean(axis=0)
+        s = "l" if c[0] > 0 else "r"
+        if c[2] < J[f"wrist_{s}"][2] + 0.005 and np.linalg.norm(c - J[f"wrist_{s}"]) < 0.24 \
+                and abs(c[0]) > abs(J[f"hip_{s}"][0]) + 0.06:
+            hand_bones[s].append(p)
+        if c[2] < J[f"ankle_{s}"][2] + 0.01:
+            foot_bones[s].append(p)
+    for s in "lr":
+        hv = np.concatenate([p["verts"] for p in hand_bones[s]])
+        J[f"handtip_{s}"] = hv[np.argsort(hv[:, 2])[: len(hv) // 10]].mean(axis=0)
+        fv = np.concatenate([p["verts"] for p in foot_bones[s]])
+        J[f"toe_{s}"] = fv[np.argsort(fv[:, 1])[: len(fv) // 12]].mean(axis=0)
+        J[f"heel_{s}"] = fv[np.argsort(-fv[:, 1])[: len(fv) // 12]].mean(axis=0)
 
-mid_hip = (J["hip_l"] + J["hip_r"]) / 2
-L4 = centroid("fourth lumbar vertebra")
-T11 = centroid("eleventh thoracic vertebra")
-T6 = centroid("sixth thoracic vertebra")
-C7 = centroid("seventh cervical vertebra")
-C1 = centroid("atlas")
-for v in (L4, T11, T6, C7, C1):
-    v[0] = 0.0
-mid_hip[0] = 0.0
-head_top = C1 + np.array([0, -0.02, 0.19])
+    mid_hip = (J["hip_l"] + J["hip_r"]) / 2
+    L4 = centroid("fourth lumbar vertebra")
+    T11 = centroid("eleventh thoracic vertebra")
+    T6 = centroid("sixth thoracic vertebra")
+    C7 = centroid("seventh cervical vertebra")
+    C1 = centroid("atlas")
+    for v in (L4, T11, T6, C7, C1):
+        v[0] = 0.0
+    mid_hip[0] = 0.0
+    head_top = C1 + np.array([0, -0.02, 0.19])
+    return J, mid_hip, L4, T11, T6, C7, C1, head_top
+
+
+J, mid_hip, L4, T11, T6, C7, C1, head_top = compute_joints()
+
+# Skeleton bones (same order as BONES below) and the body segment of each.
+BONE_SEGMENTS = ["pelvis", "spine_01", "spine_02", "spine_03", "neck", "head"] + [
+    f"{b}_{s}" for s in "lr" for b in ("clavicle", "upperarm", "lowerarm", "hand",
+                                       "thigh", "calf", "foot")]
+SEGMENT_OF = {b: ("torso" if b in ("pelvis", "spine_01", "spine_02", "spine_03")
+                  or b.startswith("clavicle") else "head" if b in ("neck", "head") else b)
+              for b in BONE_SEGMENTS}
+SEGMENT_ID = {name: k for k, name in enumerate(sorted(set(SEGMENT_OF.values())))}
+SEGMENT_LINES = [("torso", "mid_hip", "L4"), ("torso", "L4", "T11"), ("torso", "T11", "T6"),
+                 ("torso", "T6", "C7"), ("head", "C7", "head_top")] + [
+    (f"{b}_{s}", f"{a1}_{s}", f"{a2}_{s}") for s in "lr" for b, a1, a2 in (
+        ("upperarm", "shoulder", "elbow"), ("lowerarm", "elbow", "wrist"),
+        ("hand", "wrist", "handtip"), ("thigh", "hip", "knee"), ("calf", "knee", "ankle"),
+        ("foot", "ankle", "toe"))]
+
+
+def segment_lines():
+    named = dict(J, mid_hip=mid_hip, L4=L4, T11=T11, T6=T6, C7=C7, head_top=head_top)
+    return [(np.asarray(named[a]), np.asarray(named[b])) for _, a, b in SEGMENT_LINES]
+
+
+# --------------------------------------------------------- female body ----
+# The female figure keeps BodyParts3D's muscles and bones, warped by how a
+# MakeHuman female differs from a MakeHuman male in the same pose and place
+# (the female's chest is taken flat for that, so the pectorals follow the
+# ribcage, not the breasts). Her skin is the MakeHuman female body itself.
+import mh_body  # noqa: E402
+pair = mh_body.posed_pair(MPFB_DATA, J)
+if SEX == "female":
+    tris = []
+    for f, g in zip(pair["faces"], pair["groups"]):
+        if g == "body":
+            tris.append([f[0], f[1], f[2]])
+            if len(f) == 4:
+                tris.append([f[0], f[2], f[3]])
+    tris = np.array(tris)
+    body_ix = np.unique(tris)
+
+    # Body segment of every MakeHuman vertex (its dominant bone), mapped to
+    # the anatomy skeleton's bone names.
+    def anat_bone(b):
+        side = b[-1] if b[-2:] in ("_l", "_r") else ""
+        if b in ("Root", "pelvis"):
+            return "pelvis"
+        if b == "neck_01":
+            return "neck"
+        if b.split("_")[0] in ("thumb", "index", "middle", "ring", "pinky"):
+            return f"hand_{side}"
+        if b.startswith("ball_"):
+            return f"foot_{side}"
+        return b
+
+    mh_w = np.zeros((len(pair["female"]), len(BONE_SEGMENTS)))
+    for b, pairs in mh_body.Rig(MPFB_DATA).weights.items():
+        nb = anat_bone(b)
+        if nb not in BONE_SEGMENTS or not pairs:
+            continue
+        ix = np.array([q[0] for q in pairs])
+        mh_w[ix, BONE_SEGMENTS.index(nb)] += np.array([q[1] for q in pairs])
+    mh_seg = np.array([SEGMENT_ID[SEGMENT_OF[BONE_SEGMENTS[k]]] for k in mh_w.argmax(axis=1)])
+
+    # Each anatomy vertex moves with the MakeHuman vertices of its own
+    # segment (an arm resting on the hip follows the arm, not the hip).
+    def anat_segment(pts):
+        best = np.full(len(pts), 1e9)
+        label = np.zeros(len(pts), int)
+        for k, (a, b) in enumerate(segment_lines()):
+            ab = b - a
+            t = np.clip(((pts - a) @ ab) / (ab @ ab), 0, 1)
+            d = np.linalg.norm(pts - (a + t[:, None] * ab), axis=1)
+            closer = d < best
+            best[closer], label[closer] = d[closer], SEGMENT_ID[SEGMENT_LINES[k][0]]
+        return label
+
+    delta = pair["female_flat"] - pair["male"]
+    trees = {}
+    for seg in set(SEGMENT_ID.values()):
+        ix = body_ix[mh_seg[body_ix] == seg]
+        if len(ix) < 12:
+            print("female warp: segment", seg, "has", len(ix), "vertices; using all")
+            ix = body_ix
+        trees[seg] = (cKDTree(pair["male"][ix]), delta[ix])
+    print("female warp segments:", {k: int((mh_seg[body_ix] == v).sum()) for k, v in SEGMENT_ID.items()})
+
+    def warp(pts):
+        out = pts.copy()
+        label = anat_segment(pts)
+        for seg, (tree, dl) in trees.items():
+            sel = label == seg
+            if not sel.any():
+                continue
+            d, i = tree.query(pts[sel], k=12)
+            w = 1.0 / (d + 0.015) ** 2
+            out[sel] += (dl[i] * w[:, :, None]).sum(axis=1) / w.sum(axis=1)[:, None]
+        return out
+
+    for p in under_parts:
+        p["verts"] = warp(p["verts"])
+    remap = -np.ones(len(pair["female"]), int)
+    remap[body_ix] = np.arange(len(body_ix))
+    skin["verts"], skin["faces"] = pair["female"][body_ix], remap[tris]
+    skin["weights"] = mh_w[body_ix] / np.maximum(mh_w[body_ix].sum(axis=1, keepdims=True), 1e-9)
+    skin["orig_verts"] = skin["verts"]
+    # Keep every muscle a little under the female skin.
+    sn = np.zeros_like(skin["verts"])
+    fn = np.cross(skin["verts"][skin["faces"][:, 1]] - skin["verts"][skin["faces"][:, 0]],
+                  skin["verts"][skin["faces"][:, 2]] - skin["verts"][skin["faces"][:, 0]])
+    for k in range(3):
+        np.add.at(sn, skin["faces"][:, k], fn)
+    sn /= np.maximum(np.linalg.norm(sn, axis=1, keepdims=True), 1e-12)
+    skin_tree = cKDTree(skin["verts"])
+    for p in parts:
+        _, i = skin_tree.query(p["verts"])
+        depth = ((p["verts"] - skin["verts"][i]) * sn[i]).sum(axis=1)
+        # 15 mm leaves room for the 3.5 mm inflation and the coarser skin.
+        out = depth > -0.015
+        p["verts"][out] -= sn[i][out] * (depth[out] + 0.015)[:, None]
+    J, mid_hip, L4, T11, T6, C7, C1, head_top = compute_joints()
 
 # name -> (head, tail, parent)
 BONES = collections.OrderedDict([
@@ -473,9 +616,33 @@ def vertex_normals(v, f):
     return n
 
 
+# --- avatar head ---------------------------------------------------------------
+# The head is the skin's own head, drawn solid, with eyes (iris coloured by the
+# app) and hair. The male's eyes are BodyParts3D's eyeballs; the female's
+# head is MakeHuman's (her skin is the MakeHuman body), with its eyes, lashes
+# and hair styles from tools/real_head.py. The neck line where the solid head
+# starts sits under the chin.
+FEMALE = SEX == "female"
+NECK_Z = C7[2] + 0.55 * (C1[2] - C7[2])
+female_pieces = []
+if FEMALE:
+    real_head.BASE_TARGETS = []        # exactly the skin's head
+    _, pieces, _, head_info = real_head.build(MPFB_DATA, "female")
+    s_mh, t_mh = pair["scale"], pair["offset"]["female"]
+    for mat, pv, pf, _ in pieces:
+        if mat in ("sclera", "iris", "pupil", "lashes") or mat.startswith("hair_"):
+            female_pieces.append((mat, pv * s_mh + t_mh, pf))
+    head_pts = np.concatenate([pv for mat, pv, pf, _ in pieces if mat in ("head", "lips")]) * s_mh + t_mh
+    head_centre = head_info["centre"] * s_mh + t_mh
+    head_scale = head_info["scale"] * s_mh
+    chin_z = head_pts[(np.abs(head_pts[:, 0]) < 0.02) & (head_pts[:, 1] < head_centre[1] - 0.5 * head_scale), 2].min()
+    NECK_Z = min(NECK_Z, chin_z - 0.014)
+print("neck line", round(NECK_Z, 3), "C7", round(C7[2], 3), "C1", round(C1[2], 3))
+
+
 # The head is drawn solid, so the face and scalp muscles are never seen; they
 # would only poke through the thin face skin once inflated.
-_neck_cut = C7[2] + 0.55 * (C1[2] - C7[2])
+_neck_cut = NECK_Z
 parts = [p for p in parts
          if not (p["verts"][:, 2].mean() > _neck_cut and abs(p["verts"][:, 0].mean()) < 0.14)]
 # Near the head the skin is thin and fades to solid: muscles there are not
@@ -491,7 +658,7 @@ def neck_fade(z):
 
 for p in parts:
     v, f = p["verts"], p["faces"]
-    keep_f = ~(v[f][:, :, 2] > _neck_cut).all(axis=1)
+    keep_f = ~(v[f][:, :, 2] > _neck_cut - 0.35 * NECK_FADE).any(axis=1)
     if not keep_f.all():
         used = np.unique(f[keep_f])
         remap = -np.ones(len(v), int)
@@ -539,10 +706,14 @@ def slice_at(verts, faces, heights):
 hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
 hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
 # Head: opaque, from just under the jaw up.
-neck_z = C7[2] + 0.55 * (C1[2] - C7[2])
+neck_z = NECK_Z
 neck_cuts = [neck_z - NECK_FADE * i / NECK_BANDS for i in range(1, NECK_BANDS + 1)]
+# Female sports top: from under the bust to the upper chest.
+bust_lo = T11[2] + 0.45 * (T6[2] - T11[2])
+bust_hi = C7[2] - 0.11
+top_cuts = (bust_lo, bust_hi) if SEX == "female" else ()
 skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"],
-                                        (hem_z, waist_z, neck_z, *neck_cuts))
+                                        (hem_z, waist_z, neck_z, *neck_cuts, *top_cuts))
 # Give the shorts a plain front panel: pull the middle of the front onto one
 # smooth plane just ahead of the thighs, fading out to the sides and the waist.
 sv = skin["verts"]
@@ -565,8 +736,32 @@ near_d, near_i = cKDTree(under_pts).query(skin["verts"], k=8)
 falloff = 1.0 / (near_d + 0.004) ** 2
 skin_w = (under_w[near_i] * falloff[:, :, None]).sum(axis=1)
 skin_w /= skin_w.sum(axis=1, keepdims=True)
-all_verts.append(skin["verts"])
-all_faces.append(skin["faces"] + offset)
+if "weights" in skin:
+    # MakeHuman skin brings its own weights; vertices added by the slicing
+    # take those of the nearest original vertex.
+    _, orig = cKDTree(skin["orig_verts"]).query(skin["verts"])
+    skin_w = np.zeros((len(skin["verts"]), len(BONE_NAMES)))
+    for k, b in enumerate(BONE_SEGMENTS):
+        skin_w[:, BONE_NAMES.index(b)] = skin["weights"][orig, k]
+# Male eyes: BodyParts3D's eyeballs, seen through an almond-shaped opening
+# cut in the skin in front of each.
+male_eyes = []
+if not FEMALE:
+    eb = weld(read_stl("FMA12513"))[0]
+    eb[:, 2] -= ground
+    for side in (eb[eb[:, 0] > 0], eb[eb[:, 0] <= 0]):
+        c = (side.min(axis=0) + side.max(axis=0)) / 2
+        male_eyes.append((c, (side.max(axis=0) - side.min(axis=0)).mean() / 2))
+    sv = skin["verts"]
+    field = np.full(len(sv), -1.0)
+    for c, r in male_eyes:
+        dx, dz = (sv[:, 0] - c[0]) / (0.82 * r), (sv[:, 2] - c[2] - 0.08 * r) / (0.36 * r)
+        f = 1 - dx * dx - dz * dz
+        field = np.maximum(field, np.where((sv[:, 1] < c[1]) & (sv[:, 1] > c[1] - 2.5 * r), f, -1.0))
+    V, A, fin, fout = real_head.split(sv, skin["faces"], field, skin_w)
+    V, A, F = real_head.compact(V, A, fout)
+    skin["verts"], skin["faces"], skin_w = V, F, A
+    print("eye openings:", len(fin), "skin triangles removed")
 lower = [BONE_NAMES.index(b) for b in ("pelvis", "spine_01", "thigh_l", "thigh_r")]
 centre = skin["verts"][skin["faces"]].mean(axis=1)
 on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
@@ -574,6 +769,13 @@ shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
 head = (centre[:, 2] > neck_z) & (np.abs(centre[:, 0]) < 0.14)
 skin_mat = np.full(len(skin["faces"]), material_names.index("skin"))
 skin_mat[shorts] = material_names.index("shorts")
+if SEX == "female":
+    # Sports top: the torso from under the bust to the upper chest.
+    torso_ix = [BONE_NAMES.index(b) for b in ("spine_01", "spine_02", "spine_03",
+                                              "clavicle_l", "clavicle_r")]
+    on_torso = skin_w[skin["faces"]][:, :, torso_ix].sum(axis=2).mean(axis=1) > 0.6
+    top = on_torso & (centre[:, 2] > bust_lo) & (centre[:, 2] < bust_hi)
+    skin_mat[top] = material_names.index("shorts")
 skin_mat[head] = material_names.index("head")
 # Neck bands: band 1 sits just under the head (most solid), band N lowest.
 near_neck = (np.abs(centre[:, 0]) < 0.14) & ~head & ~shorts
@@ -581,12 +783,38 @@ for i in range(1, NECK_BANDS + 1):
     lo, hi = neck_z - NECK_FADE * i / NECK_BANDS, neck_z - NECK_FADE * (i - 1) / NECK_BANDS
     band = near_neck & (centre[:, 2] > lo) & (centre[:, 2] <= hi)
     skin_mat[band] = material_names.index(f"neck{i}")
+all_verts.append(skin["verts"])
+all_faces.append(skin["faces"] + offset)
 all_mats.append(skin_mat)
 all_w.append(skin_w)
 skin_range = (offset, offset + len(skin["verts"]))
 offset += len(skin["verts"])
+head_bone = BONE_NAMES.index("head")
 
-# --- avatar hair ------------------------------------------------------------
+
+def add_rigid(mat, v, f):
+    """A piece that moves with the head."""
+    global offset
+    all_verts.append(v)
+    all_faces.append(f + offset)
+    all_mats.append(np.full(len(f), material_names.index(mat)))
+    w = np.zeros((len(v), len(BONE_NAMES)))
+    w[:, head_bone] = 1
+    all_w.append(w)
+    offset += len(v)
+
+
+if FEMALE:
+    for mat, v, f in female_pieces:
+        add_rigid(mat, v, f)
+else:
+    for c, r in male_eyes:
+        fwd = np.array([0.06 if c[0] > 0 else -0.06, -1.0, 0.0])
+        for mat, (v, f) in real_head.eyeball(c, r * 0.97, fwd).items():
+            add_rigid(mat, v, f)
+
+
+# --- male hair ----------------------------------------------------------------
 def smooth_field(field, faces, n_verts, rounds):
     """Average a per-vertex field with its mesh neighbours a few times."""
     from scipy.sparse import coo_matrix, identity
@@ -604,30 +832,31 @@ def smooth_field(field, faces, n_verts, rounds):
 # Scalp: head skin above a hairline that runs from the forehead down to the
 # nape. Each style is a copy of it pushed out along the (smoothed) normals,
 # thinning to nothing at the hairline so the edge blends into the skin.
-head_faces = skin["faces"][head]
-head_v = np.unique(head_faces)
-hv = skin["verts"]
-top_z = hv[head_v, 2].max()
-front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
-along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
-hairline = (top_z - 0.085) + ((C1[2] + 0.005) - (top_z - 0.085)) * along ** 1.15
-above = hv[:, 2] - hairline
-scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
-scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
-scalp_n /= np.maximum(np.linalg.norm(scalp_n, axis=1, keepdims=True), 1e-12)
-taper = np.clip(above / 0.03, 0, 1)
-taper = taper * taper * (3 - 2 * taper)
-on_top = np.clip(above / 0.08, 0, 1)
-for style, (base, extra) in HAIR_STYLES.items():
-    used = np.unique(scalp_faces)
-    remap = -np.ones(len(hv), int)
-    remap[used] = np.arange(len(used))
-    lift = (base + extra * on_top[used]) * taper[used] + 0.0008
-    all_verts.append(hv[used] + scalp_n[used] * lift[:, None])
-    all_faces.append(remap[scalp_faces] + offset)
-    all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
-    all_w.append(skin_w[used])
-    offset += len(used)
+if not FEMALE:
+    head_faces = skin["faces"][head]
+    head_v = np.unique(head_faces)
+    hv = skin["verts"]
+    top_z = hv[head_v, 2].max()
+    front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
+    along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
+    hairline = (top_z - 0.085) + ((C1[2] + 0.005) - (top_z - 0.085)) * along ** 1.15
+    above = hv[:, 2] - hairline
+    scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
+    scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
+    scalp_n /= np.maximum(np.linalg.norm(scalp_n, axis=1, keepdims=True), 1e-12)
+    taper = np.clip(above / 0.03, 0, 1)
+    taper = taper * taper * (3 - 2 * taper)
+    on_top = np.clip(above / 0.08, 0, 1)
+    for style, (base, extra) in HAIR_STYLES.items():
+        used = np.unique(scalp_faces)
+        remap = -np.ones(len(hv), int)
+        remap[used] = np.arange(len(used))
+        lift = (base + extra * on_top[used]) * taper[used] + 0.0008
+        all_verts.append(hv[used] + scalp_n[used] * lift[:, None])
+        all_faces.append(remap[scalp_faces] + offset)
+        all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
+        all_w.append(skin_w[used])
+        offset += len(used)
 
 
 # ---------------------------------------------------------------- props ----
@@ -725,7 +954,12 @@ for name in material_names:
         bsdf.inputs["Emission Strength"].default_value = 1.5
     if name == "head":
         bsdf.inputs["Base Color"].default_value = SKIN_COLOR[:3] + (1.0,)
-    if name in HAIR_STYLES:
+    face = {"sclera": (0.92, 0.92, 0.9), "iris": (0.15, 0.08, 0.03), "pupil": (0.01, 0.01, 0.01),
+            "lashes": (0.01, 0.01, 0.01)}
+    if name in face:
+        bsdf.inputs["Base Color"].default_value = face[name] + (1.0,)
+        bsdf.inputs["Roughness"].default_value = 0.25 if name in ("sclera", "iris", "pupil") else 0.6
+    elif name in FACE_MATERIALS:      # hair
         bsdf.inputs["Base Color"].default_value = (0.02, 0.018, 0.016, 1.0)
         bsdf.inputs["Roughness"].default_value = 0.9
     if name.startswith("neck"):
@@ -970,6 +1204,8 @@ bpy.ops.export_scene.gltf(
     export_animation_mode="NLA_TRACKS",
     export_skins=True,
     export_morph=False,
+    export_morph_normal=False,
+    export_morph_tangent=False,
     export_cameras=False,
     export_lights=False,
 )

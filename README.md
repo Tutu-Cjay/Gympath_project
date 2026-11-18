@@ -75,6 +75,8 @@ Details: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
 ## License
 
-Proprietary, except `mobile/assets/models/anatomy_cable.glb`: derived from
-BodyParts3D, © The Database Center for Life Science, licensed under
-CC Attribution-Share Alike 2.1 Japan (rebuild with `tools/build_anatomy_model.py`).
+Proprietary, except `mobile/assets/models/anatomy_male.glb` and
+`anatomy_female.glb`: derived from BodyParts3D, © The Database Center for Life
+Science, licensed under CC Attribution-Share Alike 2.1 Japan, and MakeHuman data
+(MPFB2, CC0) for the female body (rebuild with
+`tools/build_anatomy_model.py`).
