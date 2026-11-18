@@ -146,6 +146,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     final dur = _startedAt == null
         ? 0
         : DateTime.now().difference(_startedAt!).inSeconds;
+    final simulated = _ble.simulation.value;
     final set = WorkoutSession(
       workoutName: widget.workoutName,
       reps: reps,
@@ -159,7 +160,6 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     );
     // Simulated sets go into the history only when the user chose so; they
     // are marked, so they can be told apart and deleted in one go.
-    final simulated = _ble.simulation.value;
     final store = WorkoutStore.instance;
     final save = reps > 0 && (!simulated || store.saveSimulated.value);
     final record = save && store.training.isRecord(set);
