@@ -52,6 +52,26 @@ class WorkoutStore {
   static final WorkoutStore instance = WorkoutStore._();
 
   static const String _key = 'gympath_sessions_v1';
+  static const String _saveSimKey = 'gympath_save_simulated';
+
+  /// Whether sets done in simulation mode go into the history (they are then
+  /// marked as simulated). Off by default; remembered.
+  final ValueNotifier<bool> saveSimulated = ValueNotifier<bool>(false);
+
+  Future<void> setSaveSimulated(bool on) async {
+    saveSimulated.value = on;
+    _prefs ??= await SharedPreferences.getInstance();
+    await _prefs!.setBool(_saveSimKey, on);
+  }
+
+  int get simulatedCount => _sessions.where((s) => s.simulated).length;
+
+  /// Remove every set recorded in simulation mode.
+  Future<void> removeSimulated() async {
+    _sessions.removeWhere((s) => s.simulated);
+    _recompute();
+    await _persist();
+  }
 
   final List<WorkoutSession> _sessions = [];
   SharedPreferences? _prefs;
@@ -66,6 +86,7 @@ class WorkoutStore {
 
   Future<void> load() async {
     _prefs = await SharedPreferences.getInstance();
+    saveSimulated.value = _prefs!.getBool(_saveSimKey) ?? false;
     final raw = _prefs!.getString(_key);
     _sessions.clear();
     if (raw != null && raw.isNotEmpty) {

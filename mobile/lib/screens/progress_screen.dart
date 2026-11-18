@@ -36,6 +36,10 @@ class ProgressScreen extends StatelessWidget {
                       fontSize: 24,
                       fontWeight: FontWeight.bold)),
               const SizedBox(height: 16),
+              if (WorkoutStore.instance.simulatedCount > 0) ...[
+                _SimulatedNotice(count: WorkoutStore.instance.simulatedCount),
+                const SizedBox(height: 14),
+              ],
               _WeekCard(week: week, lastWeek: lastWeek),
               const SizedBox(height: 14),
               _MuscleCard(muscles: muscles),
@@ -269,6 +273,61 @@ class _ExerciseTile extends StatelessWidget {
 
 String _kg(double v) =>
     v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+
+/// Shown while simulated sets are part of the numbers.
+class _SimulatedNotice extends StatelessWidget {
+  final int count;
+  const _SimulatedNotice({required this.count});
+
+  Future<void> _delete(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.cardBg,
+        title: const Text('Delete simulated sets?'),
+        content: Text('Removes the $count sets recorded in simulation mode. '
+            'Sets from the real tracker stay.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete',
+                  style: TextStyle(color: Color(0xFFFF6B6B)))),
+        ],
+      ),
+    );
+    if (ok == true) await WorkoutStore.instance.removeSimulated();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const amber = Color(0xFFFFC94D);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: amber.withValues(alpha: .08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: amber.withValues(alpha: .45)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.science_rounded, color: amber, size: 18),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text('Includes $count simulated set${count == 1 ? '' : 's'}',
+              style: const TextStyle(
+                  color: amber, fontSize: 12, fontWeight: FontWeight.w600)),
+        ),
+        TextButton(
+          onPressed: () => _delete(context),
+          style: TextButton.styleFrom(foregroundColor: amber),
+          child: const Text('Delete them'),
+        ),
+      ]),
+    );
+  }
+}
 
 class _Empty extends StatelessWidget {
   const _Empty();

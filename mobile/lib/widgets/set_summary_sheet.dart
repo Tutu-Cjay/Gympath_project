@@ -73,10 +73,13 @@ class SetSummarySheet extends StatelessWidget {
         );
 
     final String note;
-    if (simulated) {
-      note = 'Simulation: not saved to your history.';
-    } else if (!saved) {
+    if (set.reps == 0) {
       note = 'No reps counted, nothing saved.';
+    } else if (simulated && saved) {
+      note = 'Simulation: saved to your history, marked SIM.';
+    } else if (simulated) {
+      note = 'Simulation: not saved. Turn on saving above the figure to keep '
+          'simulated sets.';
     } else {
       note = 'Saved to your history.';
     }

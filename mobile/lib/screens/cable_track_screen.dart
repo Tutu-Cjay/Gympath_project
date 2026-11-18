@@ -155,11 +155,13 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
       setIndex: _setIndex,
       durationSec: dur,
       timestamp: DateTime.now(),
+      simulated: simulated,
     );
-    // A simulated set is a demo: it must not count as training.
+    // Simulated sets go into the history only when the user chose so; they
+    // are marked, so they can be told apart and deleted in one go.
     final simulated = _ble.simulation.value;
-    final save = reps > 0 && !simulated;
     final store = WorkoutStore.instance;
+    final save = reps > 0 && (!simulated || store.saveSimulated.value);
     final record = save && store.training.isRecord(set);
     if (save) await store.addSession(set);
     if (!mounted) return;
@@ -389,6 +391,10 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
                     ),
                     SizedBox(height: Responsive.h(context, 10)),
                     _buildSetBar(),
+                    if (connected && _ble.simulation.value) ...[
+                      SizedBox(height: Responsive.h(context, 8)),
+                      _buildSimulationSave(),
+                    ],
                     SizedBox(height: Responsive.h(context, 10)),
                     Row(
                       children: [
@@ -479,6 +485,41 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
         ),
         stepBtn(Icons.add_rounded, 1),
       ]),
+    );
+  }
+
+  /// Simulation only: save the simulated sets to the history or not.
+  Widget _buildSimulationSave() {
+    const amber = Color(0xFFFFC94D);
+    return ValueListenableBuilder<bool>(
+      valueListenable: WorkoutStore.instance.saveSimulated,
+      builder: (context, on, _) => Container(
+        padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+        decoration: BoxDecoration(
+          color: amber.withValues(alpha: .08),
+          borderRadius: BorderRadius.circular(Responsive.r(context, 12)),
+          border: Border.all(color: amber.withValues(alpha: .45)),
+        ),
+        child: Row(children: [
+          const Icon(Icons.science_rounded, color: amber, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+                on
+                    ? 'Simulation: sets are saved (marked SIM)'
+                    : 'Simulation: sets are not saved',
+                style: const TextStyle(
+                    color: amber, fontSize: 12, fontWeight: FontWeight.w600)),
+          ),
+          Switch(
+            value: on,
+            onChanged: _running
+                ? null
+                : (v) => WorkoutStore.instance.setSaveSimulated(v),
+            activeColor: amber,
+          ),
+        ]),
+      ),
     );
   }
 

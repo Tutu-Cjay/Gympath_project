@@ -102,6 +102,13 @@ void main() {
     expect(old.weightKg, 0);
     expect(old.repDetails, isEmpty);
     expect(old.workoutId, isNotEmpty);
+    expect(old.simulated, isFalse);
+    final sim = WorkoutSession(
+        workoutName: 'Face Pull', reps: 10, weightKg: 20, durationSec: 30,
+        timestamp: mon, simulated: true);
+    expect(sim.toJson()['simulated'], isTrue);
+    expect(s.toJson().containsKey('simulated'), isFalse);
+    expect(WorkoutSession.fromJson(sim.toJson()).simulated, isTrue);
   });
 
   test('raw export CSV', () {

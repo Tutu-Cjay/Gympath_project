@@ -278,11 +278,19 @@ class _SetRow extends StatelessWidget {
         child: Row(children: [
           SizedBox(
             width: 44,
-            child: Text('SET ${set.setIndex}',
-                style: const TextStyle(
-                    color: AppTheme.textMuted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w800)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('SET ${set.setIndex}',
+                  style: const TextStyle(
+                      color: AppTheme.textMuted,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800)),
+              if (set.simulated)
+                const Text('SIM',
+                    style: TextStyle(
+                        color: Color(0xFFFFC94D),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800)),
+            ]),
           ),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

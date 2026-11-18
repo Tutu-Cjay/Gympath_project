@@ -58,6 +58,9 @@ class WorkoutSession {
   final int durationSec;
   final DateTime timestamp;
 
+  /// Recorded with the built-in simulation, not the real tracker.
+  final bool simulated;
+
   const WorkoutSession({
     required this.workoutName,
     required this.reps,
@@ -67,6 +70,7 @@ class WorkoutSession {
     this.setIndex = 1,
     required this.durationSec,
     required this.timestamp,
+    this.simulated = false,
   });
 
   /// Score shown on the dashboard: one point per rep.
@@ -115,6 +119,7 @@ class WorkoutSession {
         'setIndex': setIndex,
         'durationSec': durationSec,
         'timestamp': timestamp.toIso8601String(),
+        if (simulated) 'simulated': true,
       };
 
   /// Also reads records saved by older app versions (no weight / reps detail).
@@ -136,6 +141,7 @@ class WorkoutSession {
       setIndex: (j['setIndex'] ?? 1) as int,
       durationSec: (j['durationSec'] ?? 0) as int,
       timestamp: timestamp,
+      simulated: j['simulated'] == true,
     );
   }
 }
