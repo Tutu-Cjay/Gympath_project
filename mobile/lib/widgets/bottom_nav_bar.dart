@@ -37,14 +37,14 @@ class GympathBottomNav extends StatelessWidget {
                 onTap: () => onTap(1),
               ),
               _NavItem(
-                icon: Icons.restaurant_rounded,
-                label: 'Nutrition',
+                icon: Icons.insights_rounded,
+                label: 'Progress',
                 isSelected: currentIndex == 2,
                 onTap: () => onTap(2),
               ),
               _NavItem(
-                icon: Icons.psychology_rounded,
-                label: 'Coach',
+                icon: Icons.accessibility_new_rounded,
+                label: 'Guide',
                 isSelected: currentIndex == 3,
                 onTap: () => onTap(3),
               ),

@@ -48,6 +48,11 @@ class AnatomyViewerController {
   void setFocus(String? group) => _run('focus(${jsonEncode(group)})');
   void setSkin(bool on) => _run('skin($on)');
 
+  /// Heat-map mode: every muscle group is tinted by its value (0..1) instead
+  /// of by the exercise, and the machine is hidden; null switches back.
+  void setHeat(Map<String, double>? heat) =>
+      _run('heat(${heat == null ? 'null' : jsonEncode(heat)})');
+
   /// Live mode: the clock stops and the figure follows [setProgress].
   void setLive(bool live) {
     _live = live;
@@ -76,11 +81,17 @@ class AnatomyViewer extends StatefulWidget {
   /// Rep time (0..1) and model-loaded flag, about ten times a second.
   final void Function(double t, bool ready)? onStatus;
 
+  /// Camera to open on; defaults to the exercise's own camera.
+  final String? initialOrbit;
+  final String? initialTarget;
+
   const AnatomyViewer({
     super.key,
     required this.exercise,
     required this.controller,
     this.onStatus,
+    this.initialOrbit,
+    this.initialTarget,
   });
 
   static const Color background = Color(0xFF12171A);
@@ -109,8 +120,8 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       autoPlay: true,
       animationName: e.animation,
       cameraControls: true,
-      cameraOrbit: e.cameraOrbit,
-      cameraTarget: e.cameraTarget,
+      cameraOrbit: widget.initialOrbit ?? e.cameraOrbit,
+      cameraTarget: widget.initialTarget ?? e.cameraTarget,
       fieldOfView: '28deg',
       interactionPrompt: InteractionPrompt.none,
       touchAction: TouchAction.none,
@@ -156,7 +167,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   const RETURN = ${RepTimeline.returnStart}, REST = ${RepTimeline.restStart};
   let cfg = ${jsonEncode(AnatomyViewerController._config(initial))};
   let BASE = UNDER_SKIN, skinAlpha = SKIN_ALPHA, skinDirty = true;
-  let focus = null, last = {}, lastSent = 0, paused = false;
+  let focus = null, last = {}, lastSent = 0, paused = false, heat = null;
   // Live mode: the figure eases towards the progress the tracker reports.
   let live = false, target = 0, shown = 0, lastFrame = 0;
 
@@ -191,7 +202,8 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       }
       if (FIXED.indexOf(n) >= 0) continue;
       let k = 0, tone = PRIMARY;
-      if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
+      if (heat) { k = Math.min(1, Math.max(0, heat[n] || 0)); }
+      else if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
       else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
       if (focus) { k = n === focus ? 1 : k * 0.15; }
       const key = Math.round(k * 40) + (tone === PRIMARY ? 'p' : 's');
@@ -205,6 +217,24 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       const glow = skinAlpha > 0 ? k : k * 0.3;
       m.setEmissiveFactor([tone[0] * glow, tone[1] * glow, tone[2] * glow]);
       if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
+    }
+  }
+  // Show or hide the machine (everything but the body and the shorts).
+  let original = null;
+  function machine(on) {
+    if (!mv.model) return;
+    const parts = mv.model.materials.filter(function (m) {
+      return FIXED.indexOf(m.name) >= 0 && m.name !== 'shorts';
+    });
+    if (!original) {
+      original = {};
+      for (const m of parts) original[m.name] = m.pbrMetallicRoughness.baseColorFactor.slice();
+    }
+    for (const m of parts) {
+      const c = original[m.name];
+      m.setAlphaMode(on ? 'OPAQUE' : 'BLEND');
+      m.pbrMetallicRoughness.setBaseColorFactor([c[0], c[1], c[2], on ? c[3] : 0]);
+      if (m.name === 'tracker') m.setEmissiveFactor(on ? [0, 1, 0.53] : [0, 0, 0]);
     }
   }
   function tick(now) {
@@ -227,6 +257,8 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   mv.addEventListener('load', function () {
     last = {};
     skinDirty = true;
+    original = null;
+    if (heat) machine(false);
     mv.animationName = cfg.animation;
     resume();
   });
@@ -246,6 +278,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     orbit: function (o) { mv.cameraOrbit = o; },
     camera: function (o, t) { mv.cameraOrbit = o; mv.cameraTarget = t; },
     focus: function (g) { focus = g; last = {}; },
+    heat: function (h) { heat = h; last = {}; machine(!h); },
     skin: function (on) {
       skinAlpha = on ? SKIN_ALPHA : 0.0;
       BASE = on ? UNDER_SKIN : BARE;

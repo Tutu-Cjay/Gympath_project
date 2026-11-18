@@ -6,10 +6,8 @@ import '../widgets/ble_status_chip.dart';
 import '../services/workout_store.dart';
 import 'choose_workout_screen.dart';
 import 'firmware_update_screen.dart';
-import 'gym_monitoring_screen.dart';
-import 'leaderboard_screen.dart';
-import 'meal_plan_screen.dart';
 import 'anatomy_studio_screen.dart';
+import 'progress_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -21,21 +19,27 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _currentIndex = 0;
 
+  // Kept alive between tab switches.
   final List<Widget> _screens = const [
     _HomeTab(),
     _WorkoutsTab(),
-    _NutritionTab(),
-    _CoachTab(),
+    ProgressScreen(),
   ];
+
+  static const int _guideTab = 3;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _screens,
-      ),
+      // The 3D guide is built only while its tab is open, so the model does
+      // not load at start-up or keep animating in the background.
+      body: _currentIndex == _guideTab
+          ? const AnatomyStudioScreen(embedded: true)
+          : IndexedStack(
+              index: _currentIndex,
+              children: _screens,
+            ),
       bottomNavigationBar: GympathBottomNav(
         currentIndex: _currentIndex,
         onTap: (index) => setState(() => _currentIndex = index),
@@ -53,7 +57,7 @@ class _HomeTab extends StatelessWidget {
       child: ValueListenableBuilder<WorkoutStats>(
         valueListenable: WorkoutStore.instance.stats,
         builder: (context, stats, _) {
-          final todayDone = stats.todaySessions > 0;
+          final todayDone = stats.todaySets > 0;
           final goal = WorkoutStore.dailyRepGoal;
           final goalPct =
               (stats.todayReps / goal).clamp(0.0, 1.0).toDouble();
@@ -79,17 +83,6 @@ class _HomeTab extends StatelessWidget {
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              IconButton(
-                                tooltip: '3D muscle guide',
-                                icon: const Icon(Icons.accessibility_new_rounded),
-                                color: AppTheme.neonGreen,
-                                onPressed: () => Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => const AnatomyStudioScreen(),
-                                  ),
-                                ),
-                              ),
                               IconButton(
                                 tooltip: 'Firmware update',
                                 icon: const Icon(Icons.system_update_rounded),
@@ -120,8 +113,8 @@ class _HomeTab extends StatelessWidget {
                               icon: Icons.local_fire_department_rounded,
                               checked: stats.streakDays > 0),
                           _DailyIndicator(
-                              icon: Icons.speed_rounded,
-                              checked: stats.avgAccuracy >= 90),
+                              icon: Icons.layers_rounded,
+                              checked: stats.todaySets >= 3),
                           _DailyIndicator(
                               icon: Icons.check_circle_rounded,
                               checked: goalPct >= 1.0),
@@ -255,7 +248,7 @@ class _HomeTab extends StatelessWidget {
                               context,
                               MaterialPageRoute(
                                 builder: (context) =>
-                                    const ChooseWorkoutScreen(),
+                                    const ChooseWorkoutScreen(showBack: true),
                               ),
                             );
                           },
@@ -289,8 +282,8 @@ class _HomeTab extends StatelessWidget {
                         children: [
                           Expanded(
                             child: _StatCard(
-                              value: '${stats.totalSessions}',
-                              label: 'Workouts',
+                              value: '${stats.totalSets}',
+                              label: 'Sets',
                             ),
                           ),
                           SizedBox(width: Responsive.w(context, 12)),
@@ -303,13 +296,13 @@ class _HomeTab extends StatelessWidget {
                           SizedBox(width: Responsive.w(context, 12)),
                           Expanded(
                             child: _StatCard(
-                              value: '${stats.totalVolumePoints}',
-                              label: 'Points',
+                              value: formatVolume(stats.totalVolumeKg),
+                              label: 'Volume lifted',
                             ),
                           ),
                         ],
                       ),
-                      if (stats.totalSessions == 0) ...[
+                      if (stats.totalSets == 0) ...[
                         SizedBox(height: Responsive.h(context, 20)),
                         _EmptyHint(),
                       ],
@@ -343,7 +336,7 @@ class _EmptyHint extends StatelessWidget {
           SizedBox(width: Responsive.w(context, 12)),
           const Expanded(
             child: Text(
-              'No workouts yet — tap "Add Workout" and your stats will fill in.',
+              'No sets yet. Tap "Add Workout", or try it without the tracker with Simulate.',
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
             ),
           ),
@@ -426,73 +419,6 @@ class _WorkoutsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const ChooseWorkoutScreen();
-  }
-}
-
-class _NutritionTab extends StatelessWidget {
-  const _NutritionTab();
-
-  @override
-  Widget build(BuildContext context) {
-    return const MealPlanScreen();
-  }
-}
-
-class _CoachTab extends StatefulWidget {
-  const _CoachTab();
-
-  @override
-  State<_CoachTab> createState() => _CoachTabState();
-}
-
-class _CoachTabState extends State<_CoachTab> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      top: true,
-      bottom: false,
-      child: Column(
-        children: [
-          Material(
-            color: AppTheme.darkBg,
-            child: TabBar(
-              controller: _tabController,
-              indicatorColor: AppTheme.neonGreen,
-              labelColor: AppTheme.neonGreen,
-              unselectedLabelColor: AppTheme.textMuted,
-              tabs: const [
-                Tab(text: 'Monitoring'),
-                Tab(text: 'Leaderboard'),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: AppTheme.cardBgLight),
-          Expanded(
-            child: TabBarView(
-              controller: _tabController,
-              children: const [
-                GymMonitoringScreen(),
-                LeaderboardScreen(),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+    return const ChooseWorkoutScreen(showBack: false);
   }
 }

@@ -1,16 +1,20 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
 import '../services/ble_service.dart';
+import '../services/raw_export.dart';
 import '../services/workout_store.dart';
 import '../models/cable_exercise.dart';
 import '../models/motion_reconstructor.dart';
+import '../models/rep_analyzer.dart';
 import '../models/track_sample.dart';
 import '../models/workout_session.dart';
 import '../widgets/anatomy_viewer.dart';
 import '../widgets/ble_status_chip.dart';
+import '../widgets/rep_bars.dart';
+import '../widgets/set_summary_sheet.dart';
 
 /// Live cable-machine tracking, shown on the 3D figure.
 ///
@@ -33,10 +37,17 @@ class CableTrackScreen extends StatefulWidget {
 }
 
 class _CableTrackScreenState extends State<CableTrackScreen> {
+  static const int _defaultRestSec = 90;
+  static const double _weightStep = 2.5;
+  static const int _maxRawSamples = 60000; // 20 min at 50 Hz
+
   final BleService _ble = BleService.instance;
   final AnatomyViewerController _viewer = AnatomyViewerController();
   final MotionReconstructor _motion = MotionReconstructor();
+  final RepAnalyzer _analyzer = RepAnalyzer();
+  final List<TrackSample> _raw = [];
   late final CableExercise _exercise;
+  late final String _workoutId;
   StreamSubscription<TrackSample>? _sub;
 
   TrackSample? _last;
@@ -44,14 +55,23 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
   bool _following = false; // the figure is driven by the tracker right now
   bool _modelReady = false;
   DateTime? _startedAt;
-  double _minCm = 0, _maxCm = 0; // range of motion during the set
   int _lastPushMs = 0;
+
+  double _weightKg = 20;
+  int _setIndex = 1;
+  int _savedSets = 0;
+
+  Timer? _restTimer;
+  int _restLeft = 0; // seconds; 0 = not resting
 
   @override
   void initState() {
     super.initState();
     _exercise =
         cableExerciseByName(widget.workoutName) ?? cableExercises.first;
+    _workoutId = DateTime.now().millisecondsSinceEpoch.toString();
+    final last = WorkoutStore.instance.training.lastWeight(widget.workoutName);
+    if (last > 0) _weightKg = last;
     _sub = _ble.trackStream.listen(_onSample);
     _ble.connectionState.addListener(_onLinkChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -61,6 +81,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
 
   @override
   void dispose() {
+    _restTimer?.cancel();
     _ble.connectionState.removeListener(_onLinkChanged);
     _sub?.cancel();
     if (_running) _ble.sendCommand(TrackCommand.stop);
@@ -82,6 +103,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
 
   void _onSample(TrackSample s) {
     if (!mounted) return;
+    if (_running && _raw.length < _maxRawSamples) _raw.add(s);
     final tracking = _running && s.state == TrackState.tracking;
     if (tracking) {
       if (!_following) {
@@ -94,19 +116,15 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
         _lastPushMs = s.timestampMs;
         _viewer.setProgress(progress);
       }
+      if (_analyzer.add(s) != null) HapticFeedback.lightImpact();
     } else if (_following) {
       _follow(false);
     }
-    setState(() {
-      _last = s;
-      if (!tracking) return;
-      final cm = s.position * 100;
-      _minCm = min(_minCm, cm);
-      _maxCm = max(_maxCm, cm);
-    });
+    setState(() => _last = s);
   }
 
   Future<void> _start() async {
+    _stopRest();
     final ok = await _ble.sendCommand(TrackCommand.start);
     if (!mounted) return;
     if (!ok) {
@@ -114,9 +132,10 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
       return;
     }
     _motion.reset();
+    _analyzer.reset();
+    _raw.clear();
     setState(() {
       _running = true;
-      _minCm = _maxCm = 0;
       _startedAt = DateTime.now();
     });
   }
@@ -127,97 +146,145 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     final dur = _startedAt == null
         ? 0
         : DateTime.now().difference(_startedAt!).inSeconds;
-    final rangeCm = _maxCm - _minCm;
+    final set = WorkoutSession(
+      workoutName: widget.workoutName,
+      reps: reps,
+      weightKg: _weightKg,
+      repDetails: _analyzer.reps,
+      workoutId: _workoutId,
+      setIndex: _setIndex,
+      durationSec: dur,
+      timestamp: DateTime.now(),
+    );
     // A simulated set is a demo: it must not count as training.
     final simulated = _ble.simulation.value;
-    if (reps > 0 && !simulated) {
-      await WorkoutStore.instance.addSession(WorkoutSession(
-        workoutName: widget.workoutName,
-        reps: reps,
-        accuracy: 0,
-        performance: '-',
-        bonus: 0,
-        durationSec: dur,
-        timestamp: DateTime.now(),
-      ));
-    }
+    final save = reps > 0 && !simulated;
+    final store = WorkoutStore.instance;
+    final record = save && store.training.isRecord(set);
+    if (save) await store.addSession(set);
     if (!mounted) return;
     _follow(false);
-    setState(() => _running = false);
-    await _showSummary(reps, dur, rangeCm, simulated);
+    setState(() {
+      _running = false;
+      if (save) {
+        _savedSets++;
+        _setIndex++;
+      }
+    });
+    if (record) HapticFeedback.heavyImpact();
+    final raw = List<TrackSample>.of(_raw);
+    while (mounted) {
+      final action = await SetSummarySheet.show(
+        context,
+        set: set,
+        saved: save,
+        simulated: simulated,
+        isRecord: record,
+        canExport: raw.isNotEmpty,
+      );
+      if (!mounted) return;
+      if (action == SetSummaryAction.export) {
+        await _export(raw, simulated, set.timestamp);
+        continue; // back to the summary
+      }
+      if (action == SetSummaryAction.finish) {
+        Navigator.pop(context);
+      } else if (save) {
+        _startRest(_defaultRestSec); // next set (also when swiped away)
+      }
+      return;
+    }
   }
 
-  Future<void> _showSummary(
-      int reps, int durSec, double rangeCm, bool simulated) {
-    String mmss(int s) =>
-        '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
-    Widget cell(String label, String value) => Expanded(
-          child: Column(
-            children: [
-              Text(value,
-                  style: const TextStyle(
-                      color: AppTheme.neonGreen,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800)),
-              const SizedBox(height: 2),
-              Text(label,
-                  style: const TextStyle(
-                      color: AppTheme.textSecondary, fontSize: 12)),
-            ],
-          ),
-        );
-    final String closeLabel;
-    if (simulated) {
-      closeLabel = 'Close (simulation, not saved)';
-    } else {
-      closeLabel = reps > 0 ? 'Saved. Done' : 'Close';
+  Future<void> _export(
+      List<TrackSample> raw, bool simulated, DateTime at) async {
+    final csv = RawExport.toCsv(raw,
+        exercise: widget.workoutName,
+        weightKg: _weightKg,
+        simulated: simulated,
+        recordedAt: at);
+    try {
+      await RawExport.share(csv, RawExport.fileName(widget.workoutName, at));
+    } catch (e) {
+      _toast('Export failed: $e');
     }
-    return showDialog<void>(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: AppTheme.cardBg,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.emoji_events_rounded,
-                  color: AppTheme.neonGreen, size: 48),
-              const SizedBox(height: 8),
-              Text(reps > 0 ? 'Set complete' : 'No reps recorded',
-                  style: const TextStyle(
-                      color: AppTheme.textPrimary,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text(widget.workoutName,
-                  style: const TextStyle(
-                      color: AppTheme.textSecondary, fontSize: 13)),
-              const SizedBox(height: 20),
-              Row(children: [
-                cell('Reps', '$reps'),
-                cell('Range', '${rangeCm.toStringAsFixed(0)} cm'),
-                cell('Time', mmss(durSec)),
-              ]),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: Text(closeLabel),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  }
+
+  void _startRest(int seconds) {
+    _restTimer?.cancel();
+    setState(() => _restLeft = seconds);
+    _restTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return t.cancel();
+      setState(() => _restLeft--);
+      if (_restLeft <= 3 && _restLeft > 0) HapticFeedback.selectionClick();
+      if (_restLeft <= 0) {
+        t.cancel();
+        HapticFeedback.heavyImpact();
+        _toast('Rest over. Ready for set $_setIndex');
+      }
+    });
+  }
+
+  void _stopRest() {
+    _restTimer?.cancel();
+    if (_restLeft != 0) setState(() => _restLeft = 0);
   }
 
   Future<void> _zero() async {
     await _ble.sendCommand(TrackCommand.zero);
     _motion.reset();
+  }
+
+  Future<void> _editWeight() async {
+    final ctrl = TextEditingController(text: _fmtKg(_weightKg));
+    final v = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.cardBg,
+        title: const Text('Weight on the stack'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(suffixText: 'kg'),
+          onSubmitted: (t) =>
+              Navigator.pop(ctx, double.tryParse(t.replaceAll(',', '.'))),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(
+                  ctx, double.tryParse(ctrl.text.replaceAll(',', '.'))),
+              child: const Text('OK')),
+        ],
+      ),
+    );
+    if (v != null && v >= 0 && v <= 500) setState(() => _weightKg = v);
+  }
+
+  void _stepWeight(int dir) => setState(() =>
+      _weightKg = (_weightKg + dir * _weightStep).clamp(0.0, 500.0).toDouble());
+
+  Future<bool> _confirmLeave() async {
+    if (!_running) return true;
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.cardBg,
+        title: const Text('Set in progress'),
+        content: const Text('Stop tracking and leave? This set is not saved.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep going')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Leave')),
+        ],
+      ),
+    );
+    return leave == true;
   }
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(
@@ -226,7 +293,11 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
   String get _statusText {
     final s = _last?.state;
     if (!_ble.isConnected) return 'No tracker connected';
-    if (!_running) return 'Clip the tracker on the weight stack, then press Start';
+    if (!_running) {
+      return _restLeft > 0
+          ? 'Resting before set $_setIndex'
+          : 'Clip the tracker on the weight stack, set the weight, press Start';
+    }
     switch (s) {
       case TrackState.calibrating:
         return 'Hold still. Measuring gravity…';
@@ -261,78 +332,181 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     final s = _last;
     final tracking = _running && s?.state == TrackState.tracking;
     final connected = _ble.isConnected;
-    return Scaffold(
-      backgroundColor: AppTheme.darkBg,
-      appBar: AppBar(
-        leading: IconButton(
-          onPressed: () => Navigator.pop(context),
-          icon: const Icon(Icons.arrow_back_ios_new_rounded),
+    final reps = _analyzer.reps;
+    final lastRep = reps.isEmpty ? null : reps.last;
+    return PopScope(
+      canPop: !_running,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (await _confirmLeave() && mounted) {
+          await _ble.sendCommand(TrackCommand.stop);
+          if (!mounted) return;
+          setState(() => _running = false);
+          Navigator.pop(context);
+        }
+      },
+      child: Scaffold(
+        backgroundColor: AppTheme.darkBg,
+        appBar: AppBar(
+          title: Text(widget.workoutName),
+          actions: const [
+            Padding(
+              padding: EdgeInsets.only(right: 12, top: 10, bottom: 10),
+              child: BleStatusChip(),
+            ),
+          ],
         ),
-        title: Text(widget.workoutName),
-        actions: const [
-          Padding(
-            padding: EdgeInsets.only(right: 12, top: 10, bottom: 10),
-            child: BleStatusChip(),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.all(Responsive.w(context, 16)),
-          child: ValueListenableBuilder<bool>(
-            valueListenable: _ble.trackSupported,
-            builder: (context, supported, _) {
-              if (connected && !supported) {
-                return const _Notice(
-                  icon: Icons.memory_rounded,
-                  text: 'This device firmware does not support live tracking.\n'
-                      'Flash firmware/Gympath_Track to enable it.',
+        body: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(Responsive.w(context, 16),
+                Responsive.h(context, 8), Responsive.w(context, 16),
+                Responsive.h(context, 14)),
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _ble.trackSupported,
+              builder: (context, supported, _) {
+                if (connected && !supported) {
+                  return const _Notice(
+                    icon: Icons.memory_rounded,
+                    text: 'This device firmware does not support live tracking.\n'
+                        'Flash firmware/Gympath_Track to enable it.',
+                  );
+                }
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.circle, size: 10, color: _statusColor),
+                        SizedBox(width: Responsive.w(context, 8)),
+                        Expanded(
+                          child: Text(_statusText,
+                              style: TextStyle(
+                                  color: _statusColor,
+                                  fontSize: Responsive.sp(context, 13),
+                                  fontWeight: FontWeight.w600)),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: Responsive.h(context, 10)),
+                    _buildSetBar(),
+                    SizedBox(height: Responsive.h(context, 10)),
+                    Row(
+                      children: [
+                        _Stat(label: 'Reps', value: '${s?.reps ?? 0}', big: true),
+                        SizedBox(width: Responsive.w(context, 8)),
+                        _Stat(
+                            label: 'Last rep speed',
+                            value: lastRep == null
+                                ? '—'
+                                : '${lastRep.meanVelocity.toStringAsFixed(2)} m/s'),
+                        SizedBox(width: Responsive.w(context, 8)),
+                        _Stat(
+                            label: 'Last rep range',
+                            value: lastRep == null
+                                ? (tracking
+                                    ? '${(_motion.heightM * 100).toStringAsFixed(0)} cm'
+                                    : '—')
+                                : '${lastRep.rangeCm.toStringAsFixed(0)} cm'),
+                      ],
+                    ),
+                    SizedBox(height: Responsive.h(context, 10)),
+                    Expanded(child: _buildFigure(tracking)),
+                    if (_running) ...[
+                      SizedBox(height: Responsive.h(context, 8)),
+                      RepBars(reps: reps, height: Responsive.h(context, 48)),
+                    ],
+                    if (_restLeft > 0) ...[
+                      SizedBox(height: Responsive.h(context, 10)),
+                      _buildRest(),
+                    ],
+                    SizedBox(height: Responsive.h(context, 12)),
+                    if (connected) _buildSetControls(tracking) else _buildLinkControls(),
+                  ],
                 );
-              }
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.circle, size: 10, color: _statusColor),
-                      SizedBox(width: Responsive.w(context, 8)),
-                      Expanded(
-                        child: Text(_statusText,
-                            style: TextStyle(
-                                color: _statusColor,
-                                fontSize: Responsive.sp(context, 13),
-                                fontWeight: FontWeight.w600)),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: Responsive.h(context, 12)),
-                  Row(
-                    children: [
-                      _Stat(label: 'Reps', value: '${s?.reps ?? 0}', big: true),
-                      SizedBox(width: Responsive.w(context, 10)),
-                      _Stat(
-                          label: 'Stack height',
-                          value: tracking
-                              ? '${(_motion.heightM * 100).toStringAsFixed(0)} cm'
-                              : '—'),
-                      SizedBox(width: Responsive.w(context, 10)),
-                      _Stat(
-                          label: 'Velocity',
-                          value: tracking
-                              ? '${s!.velocity.toStringAsFixed(2)} m/s'
-                              : '—'),
-                    ],
-                  ),
-                  SizedBox(height: Responsive.h(context, 14)),
-                  Expanded(child: _buildFigure(tracking)),
-                  SizedBox(height: Responsive.h(context, 14)),
-                  if (connected) _buildSetControls(tracking) else _buildLinkControls(),
-                ],
-              );
-            },
+              },
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Set number and the weight on the stack (locked while a set runs).
+  Widget _buildSetBar() {
+    final locked = _running;
+    Widget stepBtn(IconData icon, int dir) => InkWell(
+          onTap: locked ? null : () => _stepWeight(dir),
+          borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(icon,
+                size: 20,
+                color: locked ? AppTheme.textMuted : AppTheme.neonGreen),
+          ),
+        );
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(Responsive.r(context, 12)),
+        border: Border.all(color: AppTheme.cardBgLight),
+      ),
+      child: Row(children: [
+        Text('SET $_setIndex',
+            style: const TextStyle(
+                color: AppTheme.neonGreen,
+                fontSize: 13,
+                letterSpacing: 1,
+                fontWeight: FontWeight.w800)),
+        if (_savedSets > 0)
+          Text('  ·  $_savedSets done',
+              style: const TextStyle(
+                  color: AppTheme.textSecondary, fontSize: 12)),
+        const Spacer(),
+        stepBtn(Icons.remove_rounded, -1),
+        GestureDetector(
+          onTap: locked ? null : _editWeight,
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 78),
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Text('${_fmtKg(_weightKg)} kg',
+                style: TextStyle(
+                    color: locked ? AppTheme.textSecondary : AppTheme.textPrimary,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700)),
+          ),
+        ),
+        stepBtn(Icons.add_rounded, 1),
+      ]),
+    );
+  }
+
+  Widget _buildRest() {
+    final m = _restLeft ~/ 60, sec = _restLeft % 60;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: AppTheme.neonGreen.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(Responsive.r(context, 12)),
+        border: Border.all(color: AppTheme.neonGreen.withValues(alpha: .5)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.timer_outlined, color: AppTheme.neonGreen, size: 20),
+        const SizedBox(width: 8),
+        Text('Rest $m:${sec.toString().padLeft(2, '0')}',
+            style: const TextStyle(
+                color: AppTheme.neonGreen,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                fontFeatures: [FontFeature.tabularFigures()])),
+        const Spacer(),
+        TextButton(
+          onPressed: () => setState(() => _restLeft += 15),
+          child: const Text('+15 s'),
+        ),
+        TextButton(onPressed: _stopRest, child: const Text('Skip')),
+      ]),
     );
   }
 
@@ -623,3 +797,6 @@ class _Notice extends StatelessWidget {
     );
   }
 }
+
+String _fmtKg(double v) =>
+    v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);

@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
+import '../models/cable_exercise.dart';
+import '../models/training_stats.dart';
+import '../services/workout_store.dart';
 import 'anatomy_studio_screen.dart';
 import 'cable_track_screen.dart';
 
 class ChooseWorkoutScreen extends StatefulWidget {
-  const ChooseWorkoutScreen({super.key});
+  /// False when shown as a tab of the home screen.
+  final bool showBack;
+  const ChooseWorkoutScreen({super.key, this.showBack = true});
 
   @override
   State<ChooseWorkoutScreen> createState() => _ChooseWorkoutScreenState();
@@ -15,15 +20,49 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
   // Gympath is cable-machine only — every workout runs on the live
   // gravity-axis tracking graph (CableTrackScreen).
   final List<Map<String, dynamic>> _workouts = [
-    {'name': 'Lat Pulldown', 'duration': '12 min', 'icon': Icons.fitness_center_rounded},
-    {'name': 'Seated Cable Row', 'duration': '12 min', 'icon': Icons.rowing_rounded},
-    {'name': 'Tricep Pushdown', 'duration': '10 min', 'icon': Icons.sports_gymnastics_rounded},
-    {'name': 'Cable Bicep Curl', 'duration': '10 min', 'icon': Icons.fitness_center_rounded},
-    {'name': 'Cable Chest Fly', 'duration': '12 min', 'icon': Icons.sports_gymnastics_rounded},
-    {'name': 'Face Pull', 'duration': '8 min', 'icon': Icons.self_improvement_rounded},
+    {'name': 'Lat Pulldown', 'icon': Icons.fitness_center_rounded},
+    {'name': 'Seated Cable Row', 'icon': Icons.rowing_rounded},
+    {'name': 'Tricep Pushdown', 'icon': Icons.sports_gymnastics_rounded},
+    {'name': 'Cable Bicep Curl', 'icon': Icons.fitness_center_rounded},
+    {'name': 'Cable Chest Fly', 'icon': Icons.sports_gymnastics_rounded},
+    {'name': 'Face Pull', 'icon': Icons.self_improvement_rounded},
   ];
 
   String _searchQuery = '';
+
+  // Refresh the "Last: …" lines whenever a set is saved or deleted.
+  void _onStats() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WorkoutStore.instance.stats.addListener(_onStats);
+  }
+
+  @override
+  void dispose() {
+    WorkoutStore.instance.stats.removeListener(_onStats);
+    super.dispose();
+  }
+
+  /// "Last: 40 kg × 10, 3 days ago", or the muscles it trains if never done.
+  String _lastLine(String name) {
+    final sets = WorkoutStore.instance.training.setsOf(name);
+    if (sets.isEmpty) {
+      final e = cableExerciseByName(name);
+      return e == null
+          ? 'Not done yet'
+          : 'Trains ${e.primary.map((g) => muscleGroupLabels[g] ?? g).join(', ')}';
+    }
+    final s = sets.last;
+    final days = dayOf(DateTime.now()).difference(dayOf(s.timestamp)).inDays;
+    final when = days == 0 ? 'today' : days == 1 ? 'yesterday' : '$days days ago';
+    final w = s.weightKg;
+    final kg = w == w.roundToDouble() ? w.toStringAsFixed(0) : w.toStringAsFixed(1);
+    return w > 0 ? 'Last: $kg kg × ${s.reps}, $when' : 'Last: ${s.reps} reps, $when';
+  }
   int? _selectedIndex;
 
   @override
@@ -36,10 +75,7 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
       appBar: AppBar(
-        leading: IconButton(
-          onPressed: () => Navigator.pop(context),
-          icon: const Icon(Icons.arrow_back_ios_new_rounded),
-        ),
+        automaticallyImplyLeading: widget.showBack,
         title: const Text('Choose Workout'),
       ),
       body: SafeArea(
@@ -119,7 +155,7 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
                                     ),
                                   ),
                                   Text(
-                                    workout['duration'],
+                                    _lastLine(workout['name'] as String),
                                     style: const TextStyle(
                                       color: AppTheme.textSecondary,
                                       fontSize: 12,
@@ -147,28 +183,6 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
                     ),
                   );
                 },
-              ),
-            ),
-            // Daily goal card
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: Responsive.w(context, 20)),
-              child: Container(
-                padding: EdgeInsets.all(Responsive.w(context, 16)),
-                margin: EdgeInsets.only(bottom: Responsive.h(context, 16)),
-                decoration: BoxDecoration(
-                  color: AppTheme.cardBg,
-                  borderRadius: BorderRadius.circular(Responsive.r(context, 12)),
-                  border: Border.all(color: AppTheme.cardBgLight),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    Icon(Icons.dark_mode_rounded, color: AppTheme.textMuted),
-                    Icon(Icons.lock_rounded, color: AppTheme.neonGreen),
-                    const Text('57', style: TextStyle(color: AppTheme.neonGreen, fontSize: 18)),
-                    Icon(Icons.light_mode_rounded, color: AppTheme.textMuted),
-                  ],
-                ),
               ),
             ),
             // Start Workout button

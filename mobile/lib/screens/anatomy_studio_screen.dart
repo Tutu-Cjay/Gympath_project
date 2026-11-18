@@ -16,7 +16,11 @@ import 'cable_track_screen.dart';
 class AnatomyStudioScreen extends StatefulWidget {
   /// Workout to open on (a name from the workout list). Defaults to the first.
   final String? initialExercise;
-  const AnatomyStudioScreen({super.key, this.initialExercise});
+
+  /// True when shown as a tab of the home screen (no back button).
+  final bool embedded;
+  const AnatomyStudioScreen(
+      {super.key, this.initialExercise, this.embedded = false});
 
   @override
   State<AnatomyStudioScreen> createState() => _AnatomyStudioScreenState();
@@ -90,7 +94,10 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
     final phase = RepTimeline.phaseAt(_t);
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
-      appBar: AppBar(title: const Text('Movement Studio')),
+      appBar: AppBar(
+        title: const Text('Movement Studio'),
+        automaticallyImplyLeading: !widget.embedded,
+      ),
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, box) {

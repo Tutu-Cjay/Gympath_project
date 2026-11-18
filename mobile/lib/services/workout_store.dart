@@ -1,48 +1,52 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/training_stats.dart';
 import '../models/workout_session.dart';
 
-/// Aggregated, display-ready figures derived from the stored sessions.
+/// Aggregated, display-ready figures derived from the stored sets.
 class WorkoutStats {
-  final int dayNumber; // days since first ever session (1-based)
-  final int streakDays; // consecutive days up to today with ≥1 session
+  final int dayNumber; // days since the first ever set (1-based)
+  final int streakDays; // consecutive days up to today with at least one set
   final int todayReps;
-  final int todaySessions;
-  final int totalSessions;
+  final int todaySets;
+  final double todayVolumeKg;
+  final int totalWorkouts; // distinct workouts (one exercise visit each)
+  final int totalSets;
   final int totalReps;
-  final int totalVolumePoints; // sum of points (reps + bonus)
-  final int weekSessions; // sessions in the last 7 days
-  final double avgAccuracy;
+  final double totalVolumeKg;
+  final int weekDays; // days trained in the last 7 days
 
   const WorkoutStats({
     required this.dayNumber,
     required this.streakDays,
     required this.todayReps,
-    required this.todaySessions,
-    required this.totalSessions,
+    required this.todaySets,
+    required this.todayVolumeKg,
+    required this.totalWorkouts,
+    required this.totalSets,
     required this.totalReps,
-    required this.totalVolumePoints,
-    required this.weekSessions,
-    required this.avgAccuracy,
+    required this.totalVolumeKg,
+    required this.weekDays,
   });
 
   static const empty = WorkoutStats(
     dayNumber: 1,
     streakDays: 0,
     todayReps: 0,
-    todaySessions: 0,
-    totalSessions: 0,
+    todaySets: 0,
+    todayVolumeKg: 0,
+    totalWorkouts: 0,
+    totalSets: 0,
     totalReps: 0,
-    totalVolumePoints: 0,
-    weekSessions: 0,
-    avgAccuracy: 0,
+    totalVolumeKg: 0,
+    weekDays: 0,
   );
 }
 
-/// Local-first persistence for completed workouts. The dashboard listens to
-/// [stats]; calling [addSession] recomputes and notifies. The backend (Step 3)
-/// will sync this same session list, so nothing here is throwaway.
+/// Local-first persistence for completed sets. Screens listen to [stats];
+/// every change recomputes and notifies. The backend will sync this same
+/// list, so nothing here is throwaway.
 class WorkoutStore {
   WorkoutStore._();
   static final WorkoutStore instance = WorkoutStore._();
@@ -81,6 +85,16 @@ class WorkoutStore {
     _recompute();
     await _persist();
   }
+
+  /// Remove one set (e.g. one saved by mistake).
+  Future<void> removeSession(WorkoutSession session) async {
+    _sessions.remove(session);
+    _recompute();
+    await _persist();
+  }
+
+  /// Read-only analysis of everything saved.
+  TrainingStats get training => TrainingStats(_sessions);
 
   Future<void> clear() async {
     _sessions.clear();
@@ -129,26 +143,23 @@ class WorkoutStore {
         .reduce((a, b) => a.isBefore(b) ? a : b);
     final dayNumber = today.difference(first).inDays + 1;
 
-    final todaySessions = _sessions.where((s) => _dayOf(s.timestamp) == today);
+    final todaySets =
+        _sessions.where((s) => _dayOf(s.timestamp) == today).toList();
     final weekAgo = today.subtract(const Duration(days: 6));
-    final weekSessions =
-        _sessions.where((s) => !_dayOf(s.timestamp).isBefore(weekAgo)).length;
-
-    final totalReps = _sessions.fold<int>(0, (a, s) => a + s.reps);
-    final totalPoints = _sessions.fold<int>(0, (a, s) => a + s.points);
-    final avgAcc = _sessions.fold<double>(0, (a, s) => a + s.accuracy) /
-        _sessions.length;
+    final weekDays =
+        daysWithSession.where((d) => !d.isBefore(weekAgo)).length;
 
     stats.value = WorkoutStats(
       dayNumber: dayNumber,
       streakDays: streak,
-      todayReps: todaySessions.fold<int>(0, (a, s) => a + s.reps),
-      todaySessions: todaySessions.length,
-      totalSessions: _sessions.length,
-      totalReps: totalReps,
-      totalVolumePoints: totalPoints,
-      weekSessions: weekSessions,
-      avgAccuracy: avgAcc,
+      todayReps: todaySets.fold<int>(0, (a, s) => a + s.reps),
+      todaySets: todaySets.length,
+      todayVolumeKg: todaySets.fold<double>(0, (a, s) => a + s.volumeKg),
+      totalWorkouts: _sessions.map((s) => s.workoutId).toSet().length,
+      totalSets: _sessions.length,
+      totalReps: _sessions.fold<int>(0, (a, s) => a + s.reps),
+      totalVolumeKg: _sessions.fold<double>(0, (a, s) => a + s.volumeKg),
+      weekDays: weekDays,
     );
   }
 
