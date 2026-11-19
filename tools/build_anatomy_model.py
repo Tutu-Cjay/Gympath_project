@@ -33,7 +33,7 @@ import bpy
 import bmesh
 import numpy as np
 from scipy.spatial import cKDTree
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 DATA = sys.argv[1]
 OUT = sys.argv[2]
@@ -654,7 +654,41 @@ for s in "lr":
     BONES[f"thigh_{s}"] = (J[f"hip_{s}"], J[f"knee_{s}"], "pelvis")
     BONES[f"calf_{s}"] = (J[f"knee_{s}"], J[f"ankle_{s}"], f"thigh_{s}")
     BONES[f"foot_{s}"] = (J[f"ankle_{s}"], J[f"toe_{s}"], f"calf_{s}")
+# Helper bones (Quaternius figure): one at the shoulder, hip, elbow and knee
+# that turns half as far as the bone below the joint. The skin around the
+# joint follows it, so a bend is shared out over the joint instead of the
+# skin being averaged between two bones (which pinches and folds it).
+# name -> (bone above the joint, bone below it, bones counted as "above",
+#          reach of the joint's skin in metres)
+HELPERS = {}
+if QBODY:
+    for s_ in "lr":
+        HELPERS[f"shoulder_h_{s_}"] = (f"clavicle_{s_}", f"upperarm_{s_}",
+                                       (f"clavicle_{s_}", "spine_03", "spine_02"), 0.13)
+        HELPERS[f"elbow_h_{s_}"] = (f"upperarm_{s_}", f"lowerarm_{s_}", (f"upperarm_{s_}",), 0.08)
+        HELPERS[f"hip_h_{s_}"] = ("pelvis", f"thigh_{s_}", ("pelvis", "spine_01"), 0.12)
+        HELPERS[f"knee_h_{s_}"] = (f"thigh_{s_}", f"calf_{s_}", (f"thigh_{s_}",), 0.09)
+    for h, (above, below, _, _) in HELPERS.items():
+        head_, tail_ = np.asarray(BONES[below][0]), np.asarray(BONES[below][1])
+        BONES[h] = (head_, head_ + 0.3 * (tail_ - head_), above)
 BONE_NAMES = list(BONES)
+
+
+def add_helper_weights(w, v):
+    """Hand each joint's blended skin over to its helper bone."""
+    w = w.copy()
+    for h, (above, below, above_set, reach) in HELPERS.items():
+        a = w[:, [BONE_NAMES.index(b) for b in above_set]].sum(axis=1)
+        b_ = w[:, BONE_NAMES.index(below)]
+        tot = a + b_
+        t = np.where(tot > 1e-6, b_ / np.maximum(tot, 1e-6), 0.0)
+        joint = np.asarray(BONES[below][0])
+        near = np.exp(-(np.linalg.norm(v - joint, axis=1) / reach) ** 2)
+        f = 0.75 * 4 * t * (1 - t) * near * (tot > 0.05)
+        cols = [BONE_NAMES.index(x) for x in above_set] + [BONE_NAMES.index(below)]
+        w[:, cols] *= (1 - f)[:, None]
+        w[:, BONE_NAMES.index(h)] += f * tot
+    return w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9)
 
 
 def box(a, b, half_width, front):
@@ -1097,6 +1131,7 @@ if QBODY:
     w = attrs[used, 2:2 + NB]
     w = w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9)
     sv_, sf_ = attrs[used, 2 + NB:2 + NB + 3], remap[faces_all]      # T-pose positions
+    w = add_helper_weights(w, sv_)
     BODY_MORPHS.append((offset, body_morphs(sv_, sf_, w, attrs[used, 2 + NB + 3:], groups)))
     add_piece(mats_all, sv_, sf_, w, attrs[used, :2])
     skin_range = (offset - len(used), offset)
@@ -1724,6 +1759,13 @@ def solve_pose(ex_name, c):
             swing = current.rotation_difference(aims[name]).to_matrix()
             m = here @ (swing @ base.to_3x3()).to_4x4()
         pose[name] = m
+    # Helper bones turn half as far as the bone below their joint.
+    for h, (above, below, _, _) in HELPERS.items():
+        base_b = pose[above] @ REST[above].inverted() @ REST[below]
+        turn = (pose[below].to_3x3() @ base_b.to_3x3().inverted()).to_quaternion()
+        half = Quaternion().slerp(turn, 0.5).to_matrix()
+        base_h = pose[above] @ REST[above].inverted() @ REST[h]
+        pose[h] = Matrix.Translation(base_h.to_translation()) @ (half @ base_h.to_3x3()).to_4x4()
     for name, transform in solve_props(ex_name, pose, c, hip_z).items():
         pose[name] = transform @ REST[name]
     return pose
