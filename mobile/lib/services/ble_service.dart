@@ -467,10 +467,10 @@ class BleService {
   }
 
   /// Bytes that fit in one OTA write after the ATT header and our op byte.
-  int get otaChunkSize {
-    final mtu = _device?.mtuNow ?? 23;
-    return (mtu - 3 - 1).clamp(20, 512);
-  }
+  /// A characteristic value is at most 512 bytes, op byte included.
+  int get otaChunkSize => otaChunkFor(_device?.mtuNow ?? 23);
+
+  static int otaChunkFor(int mtu) => (mtu - 3).clamp(21, 512) - 1;
 
   /// Ask Android for the fastest connection interval (OTA throughput).
   Future<void> requestHighThroughput() async {

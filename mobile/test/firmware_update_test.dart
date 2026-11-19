@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gympath/services/ble_service.dart';
 import 'package:gympath/services/firmware_update_service.dart';
 
 void main() {
@@ -35,5 +36,17 @@ void main() {
     expect(m.size, 535120);
     expect(m.md5, 'b710b23ae09c4f21451839aaff39e02c'); // normalised to lower
     expect(m.url.host, 'tutu-cjay.github.io');
+  });
+
+  test('OTA chunks fit a 512-byte characteristic value with the op byte', () {
+    expect(BleService.otaChunkFor(517), 511);
+    expect(BleService.otaChunkFor(512), 508);
+    expect(BleService.otaChunkFor(185), 181);
+    expect(BleService.otaChunkFor(23), 20);
+  });
+
+  test('the CI release is checked first for new firmware', () {
+    expect(FirmwareUpdateService.manifestUrls.first.path,
+        endsWith('/releases/download/firmware-latest/manifest.json'));
   });
 }

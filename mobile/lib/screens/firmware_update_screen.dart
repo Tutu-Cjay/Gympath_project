@@ -7,7 +7,8 @@ import '../widgets/ble_status_chip.dart';
 
 enum _Phase { idle, checking, ready, upToDate, downloading, flashing, done, error }
 
-/// Check github.io for newer tracker firmware and install it over BLE.
+/// Check the published firmware (GitHub release) for a newer tracker
+/// version and install it over BLE.
 class FirmwareUpdateScreen extends StatefulWidget {
   const FirmwareUpdateScreen({super.key});
 

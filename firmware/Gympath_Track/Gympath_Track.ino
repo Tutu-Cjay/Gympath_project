@@ -20,17 +20,28 @@
  * BLE is callback-free on purpose: NimBLE-Arduino 2.x does not call the old
  * 1.x callback signatures, so connection state is read from
  * getConnectedCount() and commands are polled from the characteristic value.
+ *
+ * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
+ *
+ * Release notes
+ * 1.1.0: reps that pause at either end are no longer lost; motion is
+ * integrated with the real time between IMU samples; the first START after
+ * reconnecting is never ignored; a stalled update is cancelled after 15 s
+ * and a failed update is shown on the screen; an IMU fault is shown instead
+ * of a frozen screen; a new image that crashes rolls back to the old one.
  */
 #include <Wire.h>
 #include <QMI8658.h>
 #include <TFT_eSPI.h>
 #include <NimBLEDevice.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 #include <math.h>
 
-#define FW_VERSION   "1.0.0"     // bump on every release; the app compares it
-                                 // with firmware/manifest.json to offer updates
-#define FW_BUILD     "TRACK-1D-1"
+#define FW_VERSION   "1.1.0"     // bump on every release; the app compares it
+                                 // with the published manifest.json to offer
+                                 // updates (.github/workflows/firmware.yml)
+#define FW_BUILD     "TRACK-1D-2"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -60,6 +71,7 @@ TFT_eSPI tft;
 //   BEGIN [1, size u32 LE, md5 16 B]   DATA [2, bytes…]   END [3]   ABORT [4]
 // Device notifies status on the same characteristic:
 //   [state, err, written u32 LE]  state: 0 idle, 1 receiving, 2 done, 3 error
+//   err: 1 bad header, 2 no space, 3 flash write, 4 verify/MD5, 5 timed out
 enum OtaOp : uint8_t { OTA_BEGIN = 1, OTA_DATA = 2, OTA_END = 3, OTA_ABORT = 4 };
 enum OtaState : uint8_t { OTA_IDLE = 0, OTA_RECEIVING = 1, OTA_DONE = 2, OTA_ERROR = 3 };
 
@@ -105,6 +117,9 @@ volatile uint8_t  otaErr = 0;
 volatile uint32_t otaSize = 0, otaWritten = 0;
 volatile bool     otaRebootPending = false;
 uint32_t          otaDoneMs = 0;
+volatile uint32_t otaLastMs = 0;         // last BEGIN / DATA (stall detection)
+volatile uint32_t otaErrorMs = 0;        // when the last update failed
+const uint32_t    OTA_STALL_MS = 15000;  // no data this long → cancel
 
 /* ================= TUNING ================= */
 const uint32_t CALIB_WINDOW_MS  = 600;    // still window used for gravity
@@ -124,7 +139,6 @@ const float    BIAS_REFINE      = 0.002f; // per still sample, refine gyro bias
 
 const float    REP_MIN_DISP     = 0.05f;  // m  an excursion must travel ≥ 5 cm
 const float    REP_RETURN_FRAC  = 0.60f;  // …and come back ≥ 60 % of it
-const float    DIR_VEL_TH       = 0.04f;  // m/s  velocity that counts as moving
 
 /* ================= STATE ================= */
 volatile uint8_t state = ST_IDLE;
@@ -144,12 +158,18 @@ float aF = 0, v = 0, p = 0, accEnv = 0;
 float stillT = 0;
 bool  zupt = false;
 
-// direction-agnostic rep counter: one rep = go out ≥ REP_MIN_DISP, come back
-int8_t outDir = 0;            // +1 / −1 direction of the current excursion
-float  outDisp = 0, backDisp = 0;
-bool   counted = false;
+// Rep counter (direction agnostic, position based): one rep = the stack
+// travels ≥ REP_MIN_DISP from where the movement started and comes back
+// ≥ REP_RETURN_FRAC of the way. A pause at either end (ZUPT) keeps the
+// excursion, so a held contraction still counts.
+float  repBase = 0;           // where the current excursion started (m)
+float  repPeak = 0;           // furthest distance from repBase so far (m)
+int8_t repDir  = 0;           // +1 / −1 during an excursion, 0 between reps
+int8_t lastDir = 0;           // direction of the last rep (0 after a rest)
 
-uint32_t lastUs = 0, lastBleMs = 0, lastDbgMs = 0;
+uint32_t lastSampleUs = 0, lastBleMs = 0, lastDbgMs = 0;
+bool     imuOk = true;
+bool     fwConfirmed = false;
 int32_t  lastRepSent = -1;
 int      lastSeq = -1;
 bool     wasConnected = false;
@@ -167,10 +187,14 @@ static inline void norm3(float a[3]) {
   if (n > 1e-6f) { a[0] /= n; a[1] /= n; a[2] /= n; }
 }
 
+void resetReps() {
+  repBase = p; repPeak = 0; repDir = 0; lastDir = 0;
+}
+
 void resetMotion() {
   aF = v = p = accEnv = 0;
   stillT = 0; zupt = false;
-  outDir = 0; outDisp = backDisp = 0; counted = false;
+  resetReps();
 }
 
 void beginCalibration(uint32_t now) {
@@ -188,8 +212,7 @@ void applyCommand(uint8_t cmd, uint32_t now) {
   switch (cmd) {
     case CMD_START: beginCalibration(now); break;
     case CMD_STOP:  state = ST_IDLE; resetMotion(); break;
-    case CMD_ZERO:  if (state == ST_TRACK) { p = 0; v = 0;
-                      outDir = 0; outDisp = backDisp = 0; counted = false; }
+    case CMD_ZERO:  if (state == ST_TRACK) { p = 0; v = 0; resetReps(); }
                     break;
   }
 }
@@ -285,6 +308,8 @@ void calibStep(const float a[3], const float w[3], uint32_t now) {
 }
 
 /* ================= TRACKING ================= */
+void repStep();
+
 void trackStep(const float a[3], float w[3], float dt) {
   for (int i = 0; i < 3; i++) w[i] -= gBias[i];
 
@@ -324,34 +349,33 @@ void trackStep(const float a[3], float w[3], float dt) {
     v += aUse * dt;
     v *= expf(-VEL_LEAK * dt);
   }
-  float dp = v * dt;
-  p += dp;
+  p += v * dt;
   vNow = v;
+  repStep();
+}
 
-  // ---- rep counter: out-and-back excursion, direction agnostic ----
-  if (zupt) {
-    outDir = 0; outDisp = backDisp = 0; counted = false;
+void repStep() {
+  if (repDir == 0) {
+    // Between reps the start point follows the stack: at rest, and while it
+    // keeps travelling back after a counted rep (so the next rep starts from
+    // the real turning point).
+    float d = p - repBase;
+    if (zupt) { repBase = p; lastDir = 0; }
+    else if (lastDir != 0 && d * lastDir < 0) repBase = p;
+    d = p - repBase;
+    if (fabsf(d) >= REP_MIN_DISP) {
+      repDir = d > 0 ? 1 : -1;
+      repPeak = fabsf(d);
+    }
     return;
   }
-  int8_t dir = v > DIR_VEL_TH ? 1 : (v < -DIR_VEL_TH ? -1 : 0);
-  if (outDir == 0) {
-    if (dir != 0) { outDir = dir; outDisp = backDisp = 0; counted = false; }
-    return;
-  }
-  if (dp * outDir > 0) {               // moving out
-    if (counted) {                     // previous rep done → new excursion
-      outDisp = backDisp = 0; counted = false;
-    } else if (backDisp > 0 && backDisp < REP_RETURN_FRAC * outDisp) {
-      backDisp = 0;                    // partial return, keep going out
-    }
-    outDisp += fabsf(dp);
-  } else if (dp * outDir < 0) {        // coming back
-    backDisp += fabsf(dp);
-    if (!counted && outDisp >= REP_MIN_DISP &&
-        backDisp >= REP_RETURN_FRAC * outDisp) {
-      reps = reps + 1;
-      counted = true;
-    }
+  float out = (p - repBase) * repDir;  // distance from the start, outwards
+  if (out > repPeak) repPeak = out;
+  if (out <= (1.0f - REP_RETURN_FRAC) * repPeak) {
+    reps = reps + 1;
+    lastDir = repDir;
+    repDir = 0;
+    repBase = p;
   }
 }
 
@@ -409,6 +433,31 @@ void displayTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    if (os == OTA_ERROR && millis() - otaErrorMs < 3000) {
+      if (lastPct != -2) {
+        tft.fillCircle(120, 120, 100, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("UPDATE", 120, 100, 4);
+        tft.drawString("FAILED", 120, 140, 4);
+        lastPct = -2;
+        lastState = 0xFF;
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    if (!imuOk) {
+      if (lastPct != -3) {
+        tft.fillCircle(120, 120, 100, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("SENSOR", 120, 100, 4);
+        tft.drawString("ERROR", 120, 140, 4);
+        lastPct = -3;
+      }
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
+    }
     lastPct = -1;
     uint8_t st = state;
     int r = reps;
@@ -462,6 +511,7 @@ void otaFail(uint8_t code) {
   if (Update.isRunning()) Update.abort();
   otaErr = code;
   otaState = OTA_ERROR;
+  otaErrorMs = millis();
   otaNotify();
 }
 
@@ -488,6 +538,7 @@ class OtaCallbacks : public NimBLECharacteristicCallbacks {
         state = ST_IDLE;                           // stop tracking while updating
         resetMotion();
         otaSize = size; otaWritten = 0; otaErr = 0;
+        otaLastMs = millis();
         otaState = OTA_RECEIVING;
         otaNotify();
         break;
@@ -495,8 +546,10 @@ class OtaCallbacks : public NimBLECharacteristicCallbacks {
       case OTA_DATA: {
         if (otaState != OTA_RECEIVING) return;
         size_t len = n - 1;
+        if (otaWritten + len > otaSize) { otaFail(1); return; }  // more than announced
         if (Update.write((uint8_t*)d + 1, len) != len) { otaFail(3); return; }
         otaWritten = otaWritten + len;
+        otaLastMs = millis();
         if (otaWritten % 16384 < len) otaNotify();  // progress every ~16 KB
         break;
       }
@@ -585,6 +638,10 @@ void bleNotify(uint32_t now) {
   if (wasConnected && !connected) {
     NimBLEDevice::getAdvertising()->start();   // re-advertise after drop
     if (!testMode) { state = ST_IDLE; resetMotion(); }  // a new session needs START
+    // The next app session numbers its commands from 1 again: forget the old
+    // sequence and the stale command, or its first START could be ignored.
+    lastSeq = -1;
+    if (ctrlChar) { uint8_t none[1] = {0xFF}; ctrlChar->setValue(none, 1); }
     if (otaState == OTA_RECEIVING) {           // link lost mid-update: discard
       if (Update.isRunning()) Update.abort();  // the partial image; the old
       otaState = OTA_IDLE;                     // firmware keeps running
@@ -620,7 +677,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Wire.begin(6, 7);
   Wire.setClock(400000);
-  imu.begin(Wire);
+  imuOk = imu.begin(Wire);
   imu.setAccelRange(QMI8658_ACCEL_RANGE_4G);
   imu.setGyroRange(QMI8658_GYRO_RANGE_512DPS);
   imu.setAccelODR(QMI8658_ACCEL_ODR_1000HZ);
@@ -640,28 +697,47 @@ void setup() {
   Serial.println("# GYMPATH TRACK fw=" FW_BUILD);
   Serial.println("# COLUMNS t,a,v,p,reps,state,zupt");
 #endif
-  lastUs = micros();
+  lastSampleUs = micros();
   xTaskCreatePinnedToCore(displayTask, "display", 6144, NULL, 1, NULL, 0);
 }
 
+// arduino-esp32 hook: this firmware confirms a freshly installed image itself
+// (see loop), so an image that crashes or hangs before that rolls back to the
+// previous one on the next reset, where the bootloader supports rollback.
+extern "C" bool verifyRollbackLater() { return true; }
+
 void loop() {
-  uint32_t nowUs = micros();
-  float dt = (nowUs - lastUs) * 1e-6f;
-  if (dt <= 0) dt = 1e-3f;
-  if (dt > 0.02f) dt = 0.02f;
-  lastUs = nowUs;
   uint32_t now = millis();
 
   // new firmware verified and written → give the DONE notify time to go out
   if (otaRebootPending && now - otaDoneMs > 1500) ESP.restart();
 
+  // running fine for 10 s with Bluetooth up: keep this image
+  if (!fwConfirmed && now > 10000) {
+    esp_ota_mark_app_valid_cancel_rollback();
+    fwConfirmed = true;
+  }
+
+  // an update that stopped sending data: cancel it, the old image stays
+  if (otaState == OTA_RECEIVING && now - otaLastMs > OTA_STALL_MS) {
+    otaFail(5);
+  }
+
   pollControl(now);
   pollSerial(now);
 
-  if (otaState != OTA_RECEIVING && imu.readSensorData(imuData)) {
+  if (otaState != OTA_RECEIVING && imuOk && imu.readSensorData(imuData)) {
+    // integrate over the real time since the previous sample (the loop runs
+    // faster than the IMU, so the loop period is not the sample period)
+    uint32_t nowUs = micros();
+    float dt = (nowUs - lastSampleUs) * 1e-6f;
+    lastSampleUs = nowUs;
+    if (dt <= 0) dt = 1e-3f;
+    if (dt > 0.02f) dt = 0.02f;
     float a[3] = {imuData.accelX, imuData.accelY, imuData.accelZ};
-    float w[3] = {imuData.gyroX * DEG_TO_RAD, imuData.gyroY * DEG_TO_RAD,
-                  imuData.gyroZ * DEG_TO_RAD};
+    float w[3] = {(float)(imuData.gyroX * DEG_TO_RAD),
+                  (float)(imuData.gyroY * DEG_TO_RAD),
+                  (float)(imuData.gyroZ * DEG_TO_RAD)};
     if (state == ST_CALIB)      calibStep(a, w, now);
     else if (state == ST_TRACK) trackStep(a, w, dt);
   }

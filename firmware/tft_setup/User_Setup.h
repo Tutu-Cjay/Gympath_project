@@ -26,3 +26,6 @@
 
 #define SPI_FREQUENCY  40000000
 #define SPI_READ_FREQUENCY 20000000
+
+// No touch panel on this board: silence the library's TOUCH_CS warning.
+#define DISABLE_ALL_LIBRARY_WARNINGS

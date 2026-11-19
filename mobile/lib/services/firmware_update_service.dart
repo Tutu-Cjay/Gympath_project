@@ -5,7 +5,8 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'ble_service.dart';
 
-/// Latest firmware published on GitHub Pages (website/firmware/manifest.json).
+/// Latest tracker firmware, published by the firmware CI
+/// (.github/workflows/firmware.yml) as the `firmware-latest` release.
 class FirmwareManifest {
   final String version;
   final Uri url;
@@ -36,20 +37,34 @@ class FirmwareUpdateService {
   FirmwareUpdateService._();
   static final FirmwareUpdateService instance = FirmwareUpdateService._();
 
-  static final Uri manifestUrl =
-      Uri.parse('https://tutu-cjay.github.io/firmware/manifest.json');
+  /// Where the newest manifest is looked for, in order: the CI release,
+  /// then the website the first builds were published on.
+  static final List<Uri> manifestUrls = [
+    Uri.parse('https://github.com/Tutu-Cjay/Gympath_project/releases/download/'
+        'firmware-latest/manifest.json'),
+    Uri.parse('https://tutu-cjay.github.io/firmware/manifest.json'),
+  ];
 
   final BleService _ble = BleService.instance;
 
   Future<FirmwareManifest> fetchManifest() async {
-    final r = await http
-        .get(manifestUrl, headers: {'Cache-Control': 'no-cache'})
-        .timeout(const Duration(seconds: 15));
-    if (r.statusCode != 200) {
-      throw Exception('Update server returned ${r.statusCode}');
+    Object? lastError;
+    for (final url in manifestUrls) {
+      try {
+        final r = await http
+            .get(url, headers: {'Cache-Control': 'no-cache'})
+            .timeout(const Duration(seconds: 15));
+        if (r.statusCode != 200) {
+          lastError = Exception('Update server returned ${r.statusCode}');
+          continue;
+        }
+        return FirmwareManifest.fromJson(
+            jsonDecode(r.body) as Map<String, dynamic>);
+      } catch (e) {
+        lastError = e;
+      }
     }
-    return FirmwareManifest.fromJson(
-        jsonDecode(r.body) as Map<String, dynamic>);
+    throw lastError ?? Exception('No update server reachable');
   }
 
   /// true when [latest] is newer than [current] (dotted numeric versions).
@@ -87,9 +102,14 @@ class FirmwareUpdateService {
       {required void Function(double) onProgress}) async {
     await _ble.requestHighThroughput();
 
-    // listen for the device's status notifications
+    // listen for the device's status notifications; an error the device
+    // reports while chunks are going out stops the transfer right away
     final statuses = StreamController<List<int>>.broadcast();
-    final sub = _ble.otaStatus.listen(statuses.add);
+    int? deviceError;
+    final sub = _ble.otaStatus.listen((s) {
+      if (s.isNotEmpty && s[0] == 3) deviceError = s.length > 1 ? s[1] : 0;
+      statuses.add(s);
+    });
     Future<List<int>> waitState(int want, Duration timeout) =>
         statuses.stream.firstWhere((s) {
           if (s.isNotEmpty && s[0] == 3) {
@@ -114,6 +134,7 @@ class FirmwareUpdateService {
       // DATA: [2, chunk…] — each write is acknowledged after it is flashed
       final chunk = _ble.otaChunkSize;
       for (int off = 0; off < image.length; off += chunk) {
+        if (deviceError != null) throw Exception(_errText(deviceError!));
         final end = (off + chunk).clamp(0, image.length);
         await _ble.writeOta([2, ...image.sublist(off, end)]);
         onProgress(end / image.length);
@@ -145,6 +166,8 @@ class FirmwareUpdateService {
         return 'Writing to device flash failed';
       case 4:
         return 'Update verification failed (corrupted transfer)';
+      case 5:
+        return 'The update stalled and was cancelled. Keep the phone close and try again';
       default:
         return 'Device reported an update error';
     }
