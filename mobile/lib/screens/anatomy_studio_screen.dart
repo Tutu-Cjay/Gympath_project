@@ -8,12 +8,12 @@ import 'cable_track_screen.dart';
 
 /// Movement Studio: 3D muscle guide for the cable-machine workouts.
 ///
-/// Shows a human figure on the machine (skin over real muscle shapes from
-/// BodyParts3D, see tools/build_anatomy_model.py) performing the selected
-/// exercise, seated or standing as the exercise is really done. The muscles
-/// it trains show through the skin in their own shape: green for prime
-/// movers, amber for assisting muscles, brighter as they contract. The skin
-/// can be switched off to see the full muscle anatomy.
+/// Shows a human figure on the machine (Quaternius' base character with
+/// BodyParts3D's muscles drawn on its skin, see tools/build_anatomy_model.py)
+/// performing the selected exercise, seated or standing as the exercise is
+/// really done. The muscles it trains light up on the skin in their own
+/// shape: green for prime movers, amber for assisting muscles, brighter as
+/// they contract. "Muscle map" shows every muscle group at once.
 class AnatomyStudioScreen extends StatefulWidget {
   /// Workout to open on (a name from the workout list). Defaults to the first.
   final String? initialExercise;
@@ -232,16 +232,16 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                 decoration: BoxDecoration(
-                  color: _skin
+                  color: !_skin
                       ? AppTheme.neonGreen.withValues(alpha: .18)
                       : Colors.black.withValues(alpha: .55),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                      color: _skin ? AppTheme.neonGreen : Colors.white12),
+                      color: !_skin ? AppTheme.neonGreen : Colors.white12),
                 ),
-                child: Text(_skin ? 'SKIN ON' : 'SKIN OFF',
+                child: Text('MUSCLE MAP',
                     style: TextStyle(
-                        color: _skin ? AppTheme.neonGreen : Colors.white70,
+                        color: !_skin ? AppTheme.neonGreen : Colors.white70,
                         fontSize: 9,
                         letterSpacing: 1,
                         fontWeight: FontWeight.w700)),
@@ -473,9 +473,9 @@ class _AnatomyStudioScreenState extends State<AnatomyStudioScreen> {
           'The highlights show which muscles an exercise trains and when they '
           'shorten. They are a teaching map, not a measurement of your own '
           'muscle activity.\n\n'
-          '3D anatomy: BodyParts3D, © The Database Center for Life Science, '
-          'licensed under CC Attribution-Share Alike 2.1 Japan. '
-          'Female body: MakeHuman (CC0).',
+          'Muscle shapes: BodyParts3D, © The Database Center for Life '
+          'Science, licensed under CC Attribution-Share Alike 2.1 Japan. '
+          'Characters: Quaternius (CC0).',
           style: TextStyle(color: Color(0xFFE5C98E), fontSize: 11),
         ),
       ),

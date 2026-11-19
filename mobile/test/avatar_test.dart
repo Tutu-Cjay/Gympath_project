@@ -5,7 +5,7 @@ void main() {
   test('JSON round trip for both sexes', () {
     const m = Avatar(skinTone: 4, eyeColor: 4, hair: 'hair_buzz', hairColor: 3);
     expect(Avatar.fromJson(m.toJson()), m);
-    const f = Avatar(sex: AvatarSex.female, hair: 'hair_ponytail', eyeColor: 3);
+    const f = Avatar(sex: AvatarSex.female, hair: 'hair_bun', eyeColor: 3);
     expect(Avatar.fromJson(f.toJson()), f);
     expect(f.toJson()['sex'], 'female');
   });
@@ -36,7 +36,7 @@ void main() {
     expect(f.eyeColor, 3);
     expect(f.hairColor, 2);
     expect(Avatar.femaleHair.map((o) => o.id), contains(f.hair));
-    expect(m.copyWith(hair: 'none').withSex(AvatarSex.female).hair, 'hair_ponytail');
+    expect(m.copyWith(hair: 'none').withSex(AvatarSex.female).hair, 'hair_bun');
     expect(f.withSex(AvatarSex.male).hair, Avatar.standard.hair);
   });
 

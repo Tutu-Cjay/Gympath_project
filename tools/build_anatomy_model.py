@@ -1,25 +1,27 @@
-"""Build the Movement Studio anatomy model (mobile/assets/models/anatomy_<sex>.glb).
+"""Build the Movement Studio models (mobile/assets/models/anatomy_<sex>.glb).
 
-Takes the real muscle shapes of BodyParts3D (one mesh per muscle) and its skin,
-rigs them to a simple skeleton and bakes one animation per cable exercise.
-Each muscle group becomes its own material, so the app highlights a muscle by
-tinting that muscle's actual geometry -- nothing is painted onto a surface.
-The skin is a see-through layer on top, so the figure reads as a person while
-the working muscles show through in their real shape.
+The figure is Quaternius' Universal Base Character of that sex (CC0). The real
+muscle shapes of BodyParts3D (one mesh per muscle) are fitted into it bone by
+bone, and each muscle group is drawn exactly on the skin: the skin over a
+group's muscles (found by rays going straight in from the skin) becomes that
+group's own material, cut along clean outlines, so the app lights a muscle up
+in its real shape. The figure is rigged to a simple skeleton on its own
+joints, with one baked animation per cable exercise.
 
-    pip install bpy numpy scipy
+    pip install bpy numpy scipy pillow
     git clone --depth 1 https://github.com/Kevin-Mattheus-Moerman/BodyParts3D
-    python tools/build_anatomy_model.py BodyParts3D/assets/BodyParts3D_data \
-        mobile/assets/models/anatomy_male.glb [preview_dir]
-    ANATOMY_SEX=female MPFB_DATA=mpfb2/src/mpfb/data python tools/build_anatomy_model.py \
+    # Quaternius "Universal Base Characters" (Standard, free) unzipped in pack/
+    QUATERNIUS=pack ANATOMY_SEX=male python tools/build_anatomy_model.py \
+        BodyParts3D/assets/BodyParts3D_data mobile/assets/models/anatomy_male.glb
+    QUATERNIUS=pack ANATOMY_SEX=female python tools/build_anatomy_model.py \
         BodyParts3D/assets/BodyParts3D_data mobile/assets/models/anatomy_female.glb
 
-The female figure is this one reshaped by how a MakeHuman female differs from
-a MakeHuman male (MPFB2 data, CC0): see tools/mh_body.py.
+ANATOMY_BODY=bodyparts3d builds the earlier see-through BodyParts3D figure.
 
 Data: BodyParts3D, (c) The Database Center for Life Science, licensed under
-CC Attribution-Share Alike 2.1 Japan. The generated .glb is a derivative of
-that data and carries the same licence; the app must show the credit line.
+CC Attribution-Share Alike 2.1 Japan; the muscle outlines in the .glb derive
+from it and carry the same licence, and the app shows the credit line.
+Characters, hair and textures: Quaternius, CC0.
 """
 import collections
 import math
@@ -41,8 +43,8 @@ CACHE = os.environ.get("ANATOMY_CACHE")
 # mpfb2/src/mpfb/data folder (CC0 MakeHuman data).
 SEX = os.environ.get("ANATOMY_SEX", "male")
 MPFB_DATA = os.environ.get("MPFB_DATA", "")
-if not MPFB_DATA:
-    sys.exit("MPFB_DATA must point at mpfb2/src/mpfb/data (the head is MakeHuman's)")
+if not MPFB_DATA and os.environ.get("ANATOMY_BODY", "quaternius") != "quaternius":
+    sys.exit("MPFB_DATA must point at mpfb2/src/mpfb/data")
 
 FPS = 30
 REP_SECONDS = 4.0
@@ -402,9 +404,136 @@ def segment_lines():
 # MakeHuman female differs from a MakeHuman male in the same pose and place.
 # Her skin is BodyParts3D's skin warped the same way, so skin and muscles
 # stay together exactly as on the male figure.
-import mh_body  # noqa: E402
-pair = mh_body.posed_pair(MPFB_DATA, J)
-if SEX == "female":
+# ------------------------------------------------- Quaternius body ----
+# The body the app shows is Quaternius' Universal Base Character (CC0) of the
+# user's sex. It is posed from its T-pose into this figure's rest pose, and
+# BodyParts3D's muscles and bones are fitted into it segment by segment so its
+# joints and the anatomy's coincide: each limb segment maps bone onto bone
+# (length along it, thickness across it as measured on the two skins), and the
+# torso maps cross-section onto cross-section along the spine. From here on
+# the rig, exercises and props use its joints.
+QBODY = os.environ.get("ANATOMY_BODY", "quaternius") == "quaternius"
+QUAT_ROOT = os.environ.get("QUATERNIUS", "")
+if QBODY:
+    import q_body  # noqa: E402
+    QCHAR = q_body.Character(QUAT_ROOT, SEX)
+    aims = {}
+    for s_ in "lr":
+        aims[f"upperarm_{s_}"] = J[f"elbow_{s_}"] - J[f"shoulder_{s_}"]
+        aims[f"lowerarm_{s_}"] = J[f"wrist_{s_}"] - J[f"elbow_{s_}"]
+        aims[f"thigh_{s_}"] = J[f"knee_{s_}"] - J[f"hip_{s_}"]
+        aims[f"calf_{s_}"] = J[f"ankle_{s_}"] - J[f"knee_{s_}"]
+    QCHAR.pose(aims)
+    JQ, SQ = QCHAR.rig_joints()
+    A_named = dict(J, mid_hip=mid_hip, L4=L4, T11=T11, T6=T6, C7=C7, C1=C1, head_top=head_top)
+    Q_named = dict(JQ, **SQ)
+    a_skin = skin["verts"]
+    q_body_v = QCHAR.body["verts"]
+    q_w = QCHAR.rig_weights(QCHAR.body, BONE_SEGMENTS)
+    q_seg = np.array([SEGMENT_OF[BONE_SEGMENTS[k]] for k in q_w.argmax(axis=1)])
+    seg_names = sorted(set(SEGMENT_OF.values()))
+
+    def soft_segments(pts, named):
+        """Soft weights (N, segments) by distance to each segment's lines."""
+        D = np.full((len(pts), len(seg_names)), 1e9)
+        for seg, a_, b_ in SEGMENT_LINES:
+            a0, b0 = np.asarray(named[a_]), np.asarray(named[b_])
+            ab = b0 - a0
+            t = np.clip(((pts - a0) @ ab) / (ab @ ab), 0, 1)
+            d = np.linalg.norm(pts - (a0 + t[:, None] * ab), axis=1)
+            c = seg_names.index(seg)
+            D[:, c] = np.minimum(D[:, c], d)
+        rel = D - D.min(axis=1, keepdims=True)
+        W = np.where(rel < 0.08, np.exp(-rel / 0.015), 0.0)
+        return W / W.sum(axis=1, keepdims=True), D
+
+    Wa_skin, _ = soft_segments(a_skin, A_named)
+    a_seg = np.array(seg_names)[Wa_skin.argmax(axis=1)]
+
+    # Limbs: bone onto bone.
+    limb_map = {}
+    for seg, a_, b_ in SEGMENT_LINES:
+        if seg in ("torso", "head"):
+            continue
+        ha, ta = np.asarray(A_named[a_]), np.asarray(A_named[b_])
+        hq, tq = np.asarray(Q_named[a_]), np.asarray(Q_named[b_])
+        ua, uq = (ta - ha) / np.linalg.norm(ta - ha), (tq - hq) / np.linalg.norm(tq - hq)
+
+        def radius(pts, h, u, length):
+            """Median distance from the bone, over its middle half."""
+            d = pts - h
+            t = (d @ u) / length
+            mid = (t > 0.25) & (t < 0.75)
+            d = d[mid] if mid.sum() > 20 else d
+            return np.median(np.linalg.norm(d - (d @ u)[:, None] * u, axis=1))
+        la, lq = np.linalg.norm(ta - ha), np.linalg.norm(tq - hq)
+        ra = radius(a_skin[a_seg == seg], ha, ua, la) if (a_seg == seg).sum() > 20 else 1.0
+        rq = radius(q_body_v[q_seg == seg], hq, uq, lq) if (q_seg == seg).sum() > 20 else 1.0
+        limb_map[seg] = (ha, ua, hq, q_body._rotation(ua, uq),
+                         np.linalg.norm(tq - hq) / np.linalg.norm(ta - ha), rq / ra)
+    print("Quaternius fit, limb (length, thickness) ratios:",
+          {k: (round(v[4], 2), round(v[5], 2)) for k, v in limb_map.items()})
+
+    # Torso: cross-section onto cross-section along the spine.
+    def spine_t(z, named):
+        return (z - named["mid_hip"][2]) / (named["C7"][2] - named["mid_hip"][2])
+    bins = np.arange(-0.7, 1.75, 0.05)
+
+    def sections(pts, named):
+        t = spine_t(pts[:, 2], named)
+        rows = []
+        for b in bins:
+            sel = np.abs(t - b) < 0.05
+            if sel.sum() < 12:
+                rows.append([np.nan] * 3)
+                continue
+            q = pts[sel]
+            y0, y1 = np.percentile(q[:, 1], [2, 98])
+            x0, x1 = np.percentile(q[:, 0], [2, 98])
+            rows.append([(y0 + y1) / 2, max((x1 - x0) / 2, 0.02), max((y1 - y0) / 2, 0.02)])
+        rows = np.array(rows)
+        for k in range(3):
+            ok = ~np.isnan(rows[:, k])
+            rows[:, k] = np.interp(bins, bins[ok], rows[ok, k])
+        return rows
+    sec_a = sections(a_skin[np.isin(a_seg, ["torso", "head"])], A_named)
+    sec_q = sections(q_body_v[np.isin(q_seg, ["torso", "head"])], Q_named)
+
+    def map_torso(pts):
+        t = spine_t(pts[:, 2], A_named)
+        a_ = np.stack([np.interp(t, bins, sec_a[:, k]) for k in range(3)], 1)
+        q_ = np.stack([np.interp(t, bins, sec_q[:, k]) for k in range(3)], 1)
+        z = Q_named["mid_hip"][2] + t * (Q_named["C7"][2] - Q_named["mid_hip"][2])
+        x = pts[:, 0] * q_[:, 1] / a_[:, 1]
+        y = q_[:, 0] + (pts[:, 1] - a_[:, 0]) * q_[:, 2] / a_[:, 2]
+        return np.stack([x, y, z], 1)
+
+    def map_limb(pts, seg):
+        ha, ua, hq, R, s_ax, s_rad = limb_map[seg]
+        d = pts - ha
+        along = (d @ ua)[:, None] * ua
+        return hq + (along * s_ax + (d - along) * s_rad) @ R.T
+
+    def to_quaternius(pts):
+        W, _ = soft_segments(pts, A_named)
+        out = np.zeros_like(pts)
+        for c, seg in enumerate(seg_names):
+            sel = W[:, c] > 1e-4
+            if not sel.any():
+                continue
+            f = map_torso(pts[sel]) if seg in ("torso", "head") else map_limb(pts[sel], seg)
+            out[sel] += f * W[sel, c][:, None]
+        return out
+
+    for p in under_parts:
+        p["verts"] = to_quaternius(p["verts"])
+    extra = {k: to_quaternius(np.asarray(J[k])[None])[0] for k in J if k.startswith(("scap", "heel"))}
+    J = dict(JQ, **extra)
+    mid_hip, L4, T11, T6, C7, C1, head_top = (SQ[k] for k in ("mid_hip", "L4", "T11", "T6", "C7", "C1", "head_top"))
+if not QBODY:
+    import mh_body  # noqa: E402
+    pair = mh_body.posed_pair(MPFB_DATA, J)
+if SEX == "female" and not QBODY:
     tris = []
     for f, g in zip(pair["faces"], pair["groups"]):
         if g == "body":
@@ -683,7 +812,7 @@ for p in parts:
     push = MUSCLE_INFLATE * p["fade"] - 0.004 * (1 - p["fade"])
     p["verts"] = p["verts"] + p["normals"] * push[:, None]
 
-if SEX == "female":
+if SEX == "female" and not QBODY:
     # Her clothes are opaque: muscle under them is never seen but could poke
     # through the reshaped skin, so the parts of torso and hip muscles that
     # lie under the shorts and the sports top are left out.
@@ -712,198 +841,28 @@ if SEX == "female":
     parts = [p for p in parts if len(p["faces"]) >= 4]
     print("female: left out", dropped, "muscle triangles under her clothes")
 
-material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
-all_verts, all_faces, all_mats, all_w = [], [], [], []
+if QBODY:
+    # The body is opaque: each muscle group is a region of its skin, plus
+    # "skin" (between and beyond them), the eyes, brows and hair styles.
+    STATIC_MATERIALS = (["skin", "shorts", "sclera", "iris", "pupil", "brows"] + list(q_body.HAIR[SEX])
+                        + ["equipment", "cable", "tracker", "pad"])
+    FACE_MATERIALS = ["sclera", "iris", "pupil", "brows"] + list(q_body.HAIR[SEX])
+    # A group's region over the underwear is its own material (<group>_cloth)
+    # so it can light up in the cloth's colour.
+    material_names = ([g for g, _ in GROUPS] + [g + "_cloth" for g, _ in GROUPS]
+                      + STATIC_MATERIALS)
+else:
+    material_names = [g for g, _ in GROUPS] + ["other_muscle"] + STATIC_MATERIALS
+all_verts, all_faces, all_mats, all_w, all_uv = [], [], [], [], []
 offset = 0
-for p in parts:
+for p in ([] if QBODY else parts):
     all_verts.append(p["verts"])
     all_faces.append(p["faces"] + offset)
     all_mats.append(np.full(len(p["faces"]), material_names.index(group_of(p))))
     all_w.append(skin_weights(p))
     offset += len(p["verts"])
 
-# The skin follows whatever lies right under it: each skin vertex takes the
-# blended weights of the nearest muscle / bone vertices. That keeps the arm's
-# skin with the arm even where it hangs close to the ribs.
-def slice_at(verts, faces, heights):
-    """Cut the surface along horizontal planes so a region can end on a clean line."""
-    me = bpy.data.meshes.new("tmp")
-    me.from_pydata(verts.tolist(), [], faces.tolist())
-    bm = bmesh.new()
-    bm.from_mesh(me)
-    for z in heights:
-        bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:], dist=1e-6,
-                               plane_co=(0, 0, z), plane_no=(0, 0, 1))
-    bmesh.ops.triangulate(bm, faces=bm.faces[:])
-    bm.verts.ensure_lookup_table()
-    v = np.array([vert.co[:] for vert in bm.verts])
-    f = np.array([[vert.index for vert in face.verts] for face in bm.faces], dtype=np.int32)
-    bm.free()
-    bpy.data.meshes.remove(me)
-    return v, f
-
-
-# Shorts: the band of skin between mid-thigh and the waist, as its own material.
-hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
-hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
-if SEX == "female":
-    # Under her shorts the hip muscles sit close to the skin: pull them 6 mm
-    # towards the bone axis so they never show through the cloth.
-    for p in parts:
-        v = p["verts"]
-        sel = (v[:, 2] > hem_z - 0.02) & (v[:, 2] < waist_z + 0.02)
-        if not sel.any():
-            continue
-        q = v[sel]
-        best, axis_pt = np.full(len(q), 1e9), np.zeros_like(q)
-        for a, b in segment_lines():
-            ab = b - a
-            t = np.clip(((q - a) @ ab) / (ab @ ab), 0, 1)
-            c = a + t[:, None] * ab
-            d = np.linalg.norm(q - c, axis=1)
-            closer = d < best
-            best[closer], axis_pt[closer] = d[closer], c[closer]
-        out = (q - axis_pt) / np.maximum(best, 1e-9)[:, None]
-        v[sel] = q - out * np.minimum(0.006, 0.5 * best)[:, None]
-# Head: opaque, from just under the jaw up.
-neck_z = NECK_Z
-neck_cuts = [neck_z - NECK_FADE * i / NECK_BANDS for i in range(1, NECK_BANDS + 1)]
-# Female sports top: from under the bust to the upper chest.
-bust_lo = T11[2] + 0.45 * (T6[2] - T11[2])
-bust_hi = C7[2] - 0.11
-top_cuts = (bust_lo, bust_hi) if SEX == "female" else ()
-skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"],
-                                        (hem_z, waist_z, neck_z, *neck_cuts, *top_cuts))
-# Give the shorts a plain front panel: pull the middle of the front onto one
-# smooth plane just ahead of the thighs, fading out to the sides and the waist.
-sv = skin["verts"]
-band = (sv[:, 2] > hem_z - 0.01) & (sv[:, 2] < waist_z)
-flank = band & (np.abs(sv[:, 0]) > 0.07) & (np.abs(sv[:, 0]) < 0.11)
-panel_y = np.percentile(sv[flank, 1], 2) - 0.018
-across = np.clip((0.115 - np.abs(sv[:, 0])) / 0.05, 0, 1)   # fully flat for |x| < 6.5 cm
-up = np.clip((waist_z - sv[:, 2]) / (waist_z - hip_z - 0.02), 0, 1)
-blend = np.where(band & (sv[:, 1] < 0), (across * across * (3 - 2 * across)) * up, 0.0)
-if SEX == "female":
-    # Her shorts: only the crotch is smoothed (the male figure's shape
-    # there), pulled back onto the level of the skin beside it.
-    crotch = (sv[:, 2] > hip_z - 0.16) & (sv[:, 2] < hip_z + 0.04) & (sv[:, 1] < 0)
-    side = crotch & (np.abs(sv[:, 0]) > 0.05) & (np.abs(sv[:, 0]) < 0.08)
-    panel_y = np.median(sv[side, 1])
-    across = np.clip((0.075 - np.abs(sv[:, 0])) / 0.035, 0, 1)
-    vert = np.clip(np.minimum((sv[:, 2] - (hip_z - 0.16)) / 0.04, (hip_z + 0.04 - sv[:, 2]) / 0.04), 0, 1)
-    blend = np.where(crotch & (sv[:, 1] < panel_y), across * across * (3 - 2 * across) * vert, 0.0)
-
-sv[:, 1] = sv[:, 1] + (panel_y - sv[:, 1]) * blend
-# Folds that were flattened onto the panel now face backwards: drop them.
-tri = sv[skin["faces"]]
-facing_back = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 1] >= 0
-flat = (blend[skin["faces"]] > 0.98).all(axis=1)
-if SEX != "female":      # her smoothing is gentle; dropping folds would leave holes
-    skin["faces"] = skin["faces"][~(flat & facing_back)]
-
-under_pts = np.concatenate([p["verts"] for p in under_parts])
-under_w = np.concatenate([skin_weights(p) for p in under_parts])
-query_pts = skin["verts"]
-if SEX == "female":
-    # Back to the male shape. Slicing keeps the original vertices first (in
-    # order) and appends the cut points, which lie on original edges: those
-    # take their nearest original vertex.
-    n0 = len(female_skin)
-    i = np.arange(len(skin["verts"]))
-    if len(i) > n0:
-        _, i[n0:] = cKDTree(female_skin).query(skin["verts"][n0:])
-    query_pts = male_skin[i] + (skin["verts"] - female_skin[i])
-    under_pts = np.concatenate([p["male_verts"] for p in under_parts])
-near_d, near_i = cKDTree(under_pts).query(query_pts, k=8)
-falloff = 1.0 / (near_d + 0.004) ** 2
-skin_w = (under_w[near_i] * falloff[:, :, None]).sum(axis=1)
-skin_w /= skin_w.sum(axis=1, keepdims=True)
-# Eyes: BodyParts3D's eyeballs, seen through an almond-shaped opening cut in
-# the skin in front of each.
-male_eyes = []
-if True:
-    eb = weld(read_stl("FMA12513"))[0]
-    eb[:, 2] -= ground
-    if FEMALE:
-        eb = warp(eb, "female")
-    for side in (eb[eb[:, 0] > 0], eb[eb[:, 0] <= 0]):
-        c = (side.min(axis=0) + side.max(axis=0)) / 2
-        male_eyes.append((c, (side.max(axis=0) - side.min(axis=0)).mean() / 2))
-    sv = skin["verts"]
-    field = np.full(len(sv), -1.0)
-    for c, r in male_eyes:
-        dx, dz = (sv[:, 0] - c[0]) / (0.82 * r), (sv[:, 2] - c[2] - 0.08 * r) / (0.36 * r)
-        f = 1 - dx * dx - dz * dz
-        field = np.maximum(field, np.where((sv[:, 1] < c[1]) & (sv[:, 1] > c[1] - 2.5 * r), f, -1.0))
-    V, A, fin, fout = real_head.split(sv, skin["faces"], field, skin_w)
-    V, A, F = real_head.compact(V, A, fout)
-    skin["verts"], skin["faces"], skin_w = V, F, A
-    print("eye openings:", len(fin), "skin triangles removed")
-lower = [BONE_NAMES.index(b) for b in ("pelvis", "spine_01", "thigh_l", "thigh_r")]
-centre = skin["verts"][skin["faces"]].mean(axis=1)
-on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
-shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
-head = (centre[:, 2] > neck_z) & (np.abs(centre[:, 0]) < 0.14)
-skin_mat = np.full(len(skin["faces"]), material_names.index("skin"))
-skin_mat[shorts] = material_names.index("shorts")
-if SEX == "female":
-    # Sports top: the torso from under the bust to the upper chest.
-    torso_ix = [BONE_NAMES.index(b) for b in ("spine_01", "spine_02", "spine_03",
-                                              "clavicle_l", "clavicle_r")]
-    on_torso = skin_w[skin["faces"]][:, :, torso_ix].sum(axis=2).mean(axis=1) > 0.6
-    top = on_torso & (centre[:, 2] > bust_lo) & (centre[:, 2] < bust_hi)
-    skin_mat[top] = material_names.index("shorts")
-    # Her clothes sit a little off the skin, so no muscle shows through them.
-    from mesh_util import vertex_normals as _vn
-    sv = skin["verts"]
-    cn = _vn(sv, skin["faces"])
-    best, axis_pt = np.full(len(sv), 1e9), np.zeros_like(sv)
-    for sa, sb in segment_lines():
-        ab = sb - sa
-        t = np.clip(((sv - sa) @ ab) / (ab @ ab), 0, 1)
-        q = sa + t[:, None] * ab
-        d = np.linalg.norm(sv - q, axis=1)
-        closer = d < best
-        best[closer], axis_pt[closer] = d[closer], q[closer]
-    cn *= np.sign(((sv - axis_pt) * cn).sum(axis=1) + 1e-12)[:, None]
-    cloth = np.unique(skin["faces"][skin_mat == material_names.index("shorts")])
-    sv[cloth] += cn[cloth] * 0.007
-skin_mat[head] = material_names.index("head")
-# Neck bands: band 1 sits just under the head (most solid), band N lowest.
-near_neck = (np.abs(centre[:, 0]) < 0.14) & ~head & ~shorts
-for i in range(1, NECK_BANDS + 1):
-    lo, hi = neck_z - NECK_FADE * i / NECK_BANDS, neck_z - NECK_FADE * (i - 1) / NECK_BANDS
-    band = near_neck & (centre[:, 2] > lo) & (centre[:, 2] <= hi)
-    skin_mat[band] = material_names.index(f"neck{i}")
-all_verts.append(skin["verts"])
-all_faces.append(skin["faces"] + offset)
-all_mats.append(skin_mat)
-all_w.append(skin_w)
-skin_range = (offset, offset + len(skin["verts"]))
-offset += len(skin["verts"])
-head_bone = BONE_NAMES.index("head")
-
-
-def add_rigid(mat, v, f):
-    """A piece that moves with the head."""
-    global offset
-    all_verts.append(v)
-    all_faces.append(f + offset)
-    all_mats.append(np.full(len(f), material_names.index(mat)))
-    w = np.zeros((len(v), len(BONE_NAMES)))
-    w[:, head_bone] = 1
-    all_w.append(w)
-    offset += len(v)
-
-
-if True:
-    for c, r in male_eyes:
-        fwd = np.array([0.06 if c[0] > 0 else -0.06, -1.0, 0.0])
-        for mat, (v, f) in real_head.eyeball(c, r * 0.97, fwd).items():
-            add_rigid(mat, v, f)
-
-
-# --- hair -------------------------------------------------------------------
+# --------------------------------------------------- Quaternius skin ----
 def smooth_field(field, faces, n_verts, rounds):
     """Average a per-vertex field with its mesh neighbours a few times."""
     from scipy.sparse import coo_matrix, identity
@@ -918,45 +877,396 @@ def smooth_field(field, faces, n_verts, rounds):
     return field
 
 
-# Scalp: head skin above a hairline that runs from the forehead down to the
-# nape. Each style is a copy of it pushed out along the (smoothed) normals,
-# thinning to nothing at the hairline so the edge blends into the skin.
-if True:
-    head_faces = skin["faces"][head]
-    head_v = np.unique(head_faces)
-    hv = skin["verts"]
-    top_z = hv[head_v, 2].max()
-    front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
-    along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
-    front_hl = top_z - (0.072 if FEMALE else 0.085)   # hers is pulled back
-    hairline = front_hl + ((C1[2] + 0.005) - front_hl) * along ** 1.15
-    above = hv[:, 2] - hairline
-    scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
-    scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
-    scalp_n /= np.maximum(np.linalg.norm(scalp_n, axis=1, keepdims=True), 1e-12)
-    taper = np.clip(above / 0.03, 0, 1)
-    taper = taper * taper * (3 - 2 * taper)
-    on_top = np.clip(above / 0.08, 0, 1)
-    for style, (base, extra) in HAIR_STYLES.items():
-        used = np.unique(scalp_faces)
-        remap = -np.ones(len(hv), int)
-        remap[used] = np.arange(len(used))
-        lift = (base + extra * on_top[used]) * taper[used] + 0.0008
-        all_verts.append(hv[used] + scalp_n[used] * lift[:, None])
-        all_faces.append(remap[scalp_faces] + offset)
-        all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
-        all_w.append(skin_w[used])
-        offset += len(used)
-    if FEMALE:
-        # Ponytail: from inside the back of the head, out and down.
-        back = hv[head_v][hv[head_v, 2] > top_z - 0.09]
-        by = back[:, 1].max()
-        z0 = top_z - 0.07
-        pts = [[0, by - 0.03, z0 + 0.01], [0, by + 0.015, z0 - 0.005], [0, by + 0.04, z0 - 0.04],
-               [0, by + 0.05, z0 - 0.10], [0, by + 0.045, z0 - 0.17], [0, by + 0.035, z0 - 0.23]]
-        from mesh_util import tube
-        tv, tf = tube(pts, [0.022, 0.024, 0.022, 0.018, 0.013, 0.007], 14)
-        add_rigid("hair_ponytail", tv, tf)
+def add_piece(mat, v, f, w, uv=None):
+    global offset
+    all_verts.append(v)
+    all_faces.append(f + offset)
+    all_mats.append(np.full(len(f), material_names.index(mat)) if isinstance(mat, str) else mat)
+    all_w.append(w)
+    all_uv.append(uv if uv is not None else np.zeros((len(v), 2)))
+    offset += len(v)
+
+
+if QBODY:
+    # Muscle groups drawn exactly on the skin: from every skin point a ray
+    # goes straight in (along the inward normal); the first fitted muscle it
+    # meets gives the point its group, so each group covers precisely the
+    # skin over its muscles and a deeper muscle is hidden by the one over
+    # it. The point labels are smoothed over the surface and the skin is cut
+    # along their half-way lines, with a thin line of plain skin between
+    # neighbouring groups, so the outlines are clean curves.
+    RAY_START, RAY_DEPTH = 0.025, 0.08     # m outside the skin, m inside it
+    LINE = 0.12                            # gap between groups (label units)
+    from mathutils import Vector as _V
+    from mathutils.bvhtree import BVHTree
+    qb = QCHAR.body
+    qv, qf = qb["verts"], qb["faces"]
+    attrs = np.concatenate([qb["uv"], QCHAR.rig_weights(qb, BONE_NAMES)], axis=1)
+    qv, attrs, qf = real_head.subdivide(qv, attrs, qf)
+    NB = len(BONE_NAMES)
+    groups = [g for g, _ in GROUPS if any(group_of(p) == g for p in parts)]
+    m_verts, m_faces, m_group, o = [], [], [], 0
+    for p in parts:
+        m_verts.append(p["verts"])
+        m_faces.append(p["faces"] + o)
+        m_group.append(np.full(len(p["faces"]), groups.index(group_of(p))))
+        o += len(p["verts"])
+    m_group = np.concatenate(m_group)
+    bvh = BVHTree.FromPolygons([_V(v) for v in np.concatenate(m_verts)],
+                               np.concatenate(m_faces).tolist(), epsilon=0.0)
+    qn = vertex_normals(qv, qf)
+    no_muscle = [BONE_NAMES.index(b) for b in BONE_NAMES if b == "head" or b.startswith(("hand", "foot"))]
+    off_body = attrs[:, 2:2 + NB][:, no_muscle].sum(axis=1) > 0.5
+    label = np.full(len(qv), -1)
+    for i in np.where(~off_body)[0]:
+        hit = bvh.ray_cast(_V(qv[i] + qn[i] * RAY_START), _V(-qn[i]), RAY_START + RAY_DEPTH)
+        if hit[2] is not None:
+            label[i] = m_group[hit[2]]
+    # Tidy the labels so every group reads as one clean shape: a majority
+    # vote among neighbours removes stray points, then specks of a group (or
+    # of bare skin) smaller than MIN_PATCH points join what surrounds them.
+    from scipy.sparse import coo_matrix, identity
+    from scipy.sparse.csgraph import connected_components
+    MIN_PATCH = 40
+    ei = np.concatenate([qf[:, 0], qf[:, 1], qf[:, 2]])
+    ej = np.concatenate([qf[:, 1], qf[:, 2], qf[:, 0]])
+    adj = coo_matrix((np.ones(len(ei)), (ei, ej)), shape=(len(qv), len(qv))).tocsr()
+    adj = ((adj + adj.T) > 0).astype(float)
+    adj_self = adj + identity(len(qv), format="csr")
+    NONE = len(groups)
+    lab = np.where(label >= 0, label, NONE)
+
+    def onehot(l):
+        return coo_matrix((np.ones(len(l)), (np.arange(len(l)), l)), shape=(len(l), NONE + 1)).tocsr()
+    for _ in range(2):
+        lab = np.asarray((adj_self @ onehot(lab)).argmax(axis=1)).ravel()
+        lab[off_body] = NONE
+    for _ in range(2):
+        r, c = adj.nonzero()
+        keep = lab[r] == lab[c]
+        sub = coo_matrix((np.ones(keep.sum()), (r[keep], c[keep])), shape=adj.shape)
+        ncomp, comp = connected_components(sub, directed=False)
+        sizes = np.bincount(comp, minlength=ncomp)
+        small = (sizes[comp] < MIN_PATCH) & ~off_body
+        if not small.any():
+            break
+        # Each small patch takes the label most common around it.
+        around = adj @ onehot(np.where(small, NONE, lab))
+        around = np.asarray(around.todense())
+        around[:, NONE] *= 0.5
+        for k in np.unique(comp[small]):
+            members = comp == k
+            lab[members] = int(around[members].sum(axis=0).argmax())
+    label = np.where(lab == NONE, -1, lab)
+    print("skin points over a muscle:", round(float((label >= 0).mean()), 2))
+    # Smoothed share of each group around every point.
+    ind = np.zeros((len(qv), len(groups)))
+    ind[label >= 0, label[label >= 0]] = 1.0
+    ind = smooth_field(ind, qf, len(qv), 4)
+    attrs = np.concatenate([attrs, ind], axis=1)
+    # The underwear (black in the texture) is cut out along its edge first.
+    from PIL import Image as _Image
+    tex = np.asarray(_Image.open(os.path.join(QCHAR.tex_dir, q_body.SKIN_TEXTURE[SEX]))
+                     .convert("L").resize((1024, 1024))).astype(float) / 255
+    tex /= np.percentile(tex, 90)
+
+    def texture_at(uv):
+        x = np.clip((uv[:, 0] % 1.0) * 1023, 0, 1023).astype(int)
+        y = np.clip((uv[:, 1] % 1.0) * 1023, 0, 1023).astype(int)
+        return tex[y, x]
+    qv, attrs, cloth_f, bare_f = real_head.split(qv, qf, 0.6 - texture_at(attrs[:, :2]), attrs)
+
+    def regions(rest):
+        """Split faces into the groups' regions; returns (rest, [(group, faces)])."""
+        global qv, attrs
+        out = []
+        for gi, g in enumerate(groups):
+            share = attrs[:, 2 + NB:]
+            other = np.delete(share, gi, axis=1).max(axis=1)
+            field = np.minimum(share[:, gi] - 0.5, share[:, gi] - other - LINE)
+            near = (field[rest] > -0.3).any(axis=1)
+            if not near.any():
+                continue
+            qv, attrs, fin, fout = real_head.split(qv, rest[near], field, attrs)
+            out.append((g, fin))
+            rest = np.concatenate([rest[~near], fout])
+        return rest, out
+    bare_rest, bare_regions = regions(bare_f)
+    cloth_rest, cloth_regions = regions(cloth_f)
+    print("skin regions:", {g: len(f) for g, f in bare_regions})
+    pieces = ([("skin", bare_rest), ("shorts", cloth_rest)] + bare_regions
+              + [(g + "_cloth", f) for g, f in cloth_regions])
+    faces_all = np.concatenate([f for _, f in pieces])
+    mats_all = np.concatenate([np.full(len(f), material_names.index(n)) for n, f in pieces])
+    used = np.unique(faces_all)
+    remap = -np.ones(len(qv), int)
+    remap[used] = np.arange(len(used))
+    w = attrs[used, 2:2 + NB]
+    add_piece(mats_all, qv[used], remap[faces_all], w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9),
+              attrs[used, :2])
+    skin_range = (offset - len(used), offset)
+
+    # Eyes: iris and pupil cut as circles in the eye texture's UV space.
+    eye = QCHAR.eyes
+    ew = QCHAR.rig_weights(eye, BONE_NAMES)
+    uvm = np.stack([eye["uv"][:, 0] % 1.0, eye["uv"][:, 1]], axis=1)
+    rad = np.linalg.norm(uvm - np.array([0.494, 0.499]), axis=1)
+    ev, ea, f_iris, f_sclera = real_head.split(eye["verts"], eye["faces"], 0.112 - rad,
+                                               np.concatenate([ew, eye["uv"]], axis=1))
+    uvm = np.stack([ea[:, -2] % 1.0, ea[:, -1]], axis=1)
+    rad = np.linalg.norm(uvm - np.array([0.494, 0.499]), axis=1)
+    ev, ea, f_pupil, f_iris = real_head.split(ev, f_iris, 0.048 - rad, ea)
+    eye_mats = np.concatenate([np.full(len(f_sclera), material_names.index("sclera")),
+                               np.full(len(f_iris), material_names.index("iris")),
+                               np.full(len(f_pupil), material_names.index("pupil"))])
+    add_piece(eye_mats, ev, np.concatenate([f_sclera, f_iris, f_pupil]), ea[:, :-2], ea[:, -2:])
+
+    # Brows and hair styles (Quaternius'), moving with the head.
+    for app_id, meshes in QCHAR.hair.items():
+        for m in meshes:
+            add_piece("brows" if app_id == "brows" else app_id, m["verts"], m["faces"],
+                      QCHAR.rig_weights(m, BONE_NAMES), m["uv"])
+else:
+    # The skin follows whatever lies right under it: each skin vertex takes the
+    # blended weights of the nearest muscle / bone vertices. That keeps the arm's
+    # skin with the arm even where it hangs close to the ribs.
+    def slice_at(verts, faces, heights):
+        """Cut the surface along horizontal planes so a region can end on a clean line."""
+        me = bpy.data.meshes.new("tmp")
+        me.from_pydata(verts.tolist(), [], faces.tolist())
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        for z in heights:
+            bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:], dist=1e-6,
+                                   plane_co=(0, 0, z), plane_no=(0, 0, 1))
+        bmesh.ops.triangulate(bm, faces=bm.faces[:])
+        bm.verts.ensure_lookup_table()
+        v = np.array([vert.co[:] for vert in bm.verts])
+        f = np.array([[vert.index for vert in face.verts] for face in bm.faces], dtype=np.int32)
+        bm.free()
+        bpy.data.meshes.remove(me)
+        return v, f
+
+
+    # Shorts: the band of skin between mid-thigh and the waist, as its own material.
+    hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
+    hem_z, waist_z = hip_z - 0.17, hip_z + 0.125
+    if SEX == "female":
+        # Under her shorts the hip muscles sit close to the skin: pull them 6 mm
+        # towards the bone axis so they never show through the cloth.
+        for p in parts:
+            v = p["verts"]
+            sel = (v[:, 2] > hem_z - 0.02) & (v[:, 2] < waist_z + 0.02)
+            if not sel.any():
+                continue
+            q = v[sel]
+            best, axis_pt = np.full(len(q), 1e9), np.zeros_like(q)
+            for a, b in segment_lines():
+                ab = b - a
+                t = np.clip(((q - a) @ ab) / (ab @ ab), 0, 1)
+                c = a + t[:, None] * ab
+                d = np.linalg.norm(q - c, axis=1)
+                closer = d < best
+                best[closer], axis_pt[closer] = d[closer], c[closer]
+            out = (q - axis_pt) / np.maximum(best, 1e-9)[:, None]
+            v[sel] = q - out * np.minimum(0.006, 0.5 * best)[:, None]
+    # Head: opaque, from just under the jaw up.
+    neck_z = NECK_Z
+    neck_cuts = [neck_z - NECK_FADE * i / NECK_BANDS for i in range(1, NECK_BANDS + 1)]
+    # Female sports top: from under the bust to the upper chest.
+    bust_lo = T11[2] + 0.45 * (T6[2] - T11[2])
+    bust_hi = C7[2] - 0.11
+    top_cuts = (bust_lo, bust_hi) if SEX == "female" else ()
+    skin["verts"], skin["faces"] = slice_at(skin["verts"], skin["faces"],
+                                            (hem_z, waist_z, neck_z, *neck_cuts, *top_cuts))
+    # Give the shorts a plain front panel: pull the middle of the front onto one
+    # smooth plane just ahead of the thighs, fading out to the sides and the waist.
+    sv = skin["verts"]
+    band = (sv[:, 2] > hem_z - 0.01) & (sv[:, 2] < waist_z)
+    flank = band & (np.abs(sv[:, 0]) > 0.07) & (np.abs(sv[:, 0]) < 0.11)
+    panel_y = np.percentile(sv[flank, 1], 2) - 0.018
+    across = np.clip((0.115 - np.abs(sv[:, 0])) / 0.05, 0, 1)   # fully flat for |x| < 6.5 cm
+    up = np.clip((waist_z - sv[:, 2]) / (waist_z - hip_z - 0.02), 0, 1)
+    blend = np.where(band & (sv[:, 1] < 0), (across * across * (3 - 2 * across)) * up, 0.0)
+    if SEX == "female":
+        # Her shorts: only the crotch is smoothed (the male figure's shape
+        # there), pulled back onto the level of the skin beside it.
+        crotch = (sv[:, 2] > hip_z - 0.16) & (sv[:, 2] < hip_z + 0.04) & (sv[:, 1] < 0)
+        side = crotch & (np.abs(sv[:, 0]) > 0.05) & (np.abs(sv[:, 0]) < 0.08)
+        panel_y = np.median(sv[side, 1])
+        across = np.clip((0.075 - np.abs(sv[:, 0])) / 0.035, 0, 1)
+        vert = np.clip(np.minimum((sv[:, 2] - (hip_z - 0.16)) / 0.04, (hip_z + 0.04 - sv[:, 2]) / 0.04), 0, 1)
+        blend = np.where(crotch & (sv[:, 1] < panel_y), across * across * (3 - 2 * across) * vert, 0.0)
+
+    sv[:, 1] = sv[:, 1] + (panel_y - sv[:, 1]) * blend
+    # Folds that were flattened onto the panel now face backwards: drop them.
+    tri = sv[skin["faces"]]
+    facing_back = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 1] >= 0
+    flat = (blend[skin["faces"]] > 0.98).all(axis=1)
+    if SEX != "female":      # her smoothing is gentle; dropping folds would leave holes
+        skin["faces"] = skin["faces"][~(flat & facing_back)]
+
+    under_pts = np.concatenate([p["verts"] for p in under_parts])
+    under_w = np.concatenate([skin_weights(p) for p in under_parts])
+    query_pts = skin["verts"]
+    if SEX == "female":
+        # Back to the male shape. Slicing keeps the original vertices first (in
+        # order) and appends the cut points, which lie on original edges: those
+        # take their nearest original vertex.
+        n0 = len(female_skin)
+        i = np.arange(len(skin["verts"]))
+        if len(i) > n0:
+            _, i[n0:] = cKDTree(female_skin).query(skin["verts"][n0:])
+        query_pts = male_skin[i] + (skin["verts"] - female_skin[i])
+        under_pts = np.concatenate([p["male_verts"] for p in under_parts])
+    near_d, near_i = cKDTree(under_pts).query(query_pts, k=8)
+    falloff = 1.0 / (near_d + 0.004) ** 2
+    skin_w = (under_w[near_i] * falloff[:, :, None]).sum(axis=1)
+    skin_w /= skin_w.sum(axis=1, keepdims=True)
+    # Eyes: BodyParts3D's eyeballs, seen through an almond-shaped opening cut in
+    # the skin in front of each.
+    male_eyes = []
+    if True:
+        eb = weld(read_stl("FMA12513"))[0]
+        eb[:, 2] -= ground
+        if FEMALE:
+            eb = warp(eb, "female")
+        for side in (eb[eb[:, 0] > 0], eb[eb[:, 0] <= 0]):
+            c = (side.min(axis=0) + side.max(axis=0)) / 2
+            male_eyes.append((c, (side.max(axis=0) - side.min(axis=0)).mean() / 2))
+        sv = skin["verts"]
+        field = np.full(len(sv), -1.0)
+        for c, r in male_eyes:
+            dx, dz = (sv[:, 0] - c[0]) / (0.82 * r), (sv[:, 2] - c[2] - 0.08 * r) / (0.36 * r)
+            f = 1 - dx * dx - dz * dz
+            field = np.maximum(field, np.where((sv[:, 1] < c[1]) & (sv[:, 1] > c[1] - 2.5 * r), f, -1.0))
+        V, A, fin, fout = real_head.split(sv, skin["faces"], field, skin_w)
+        V, A, F = real_head.compact(V, A, fout)
+        skin["verts"], skin["faces"], skin_w = V, F, A
+        print("eye openings:", len(fin), "skin triangles removed")
+    lower = [BONE_NAMES.index(b) for b in ("pelvis", "spine_01", "thigh_l", "thigh_r")]
+    centre = skin["verts"][skin["faces"]].mean(axis=1)
+    on_hips = skin_w[skin["faces"]][:, :, lower].sum(axis=2).mean(axis=1) > 0.5
+    shorts = (centre[:, 2] > hem_z) & (centre[:, 2] < waist_z) & on_hips
+    head = (centre[:, 2] > neck_z) & (np.abs(centre[:, 0]) < 0.14)
+    skin_mat = np.full(len(skin["faces"]), material_names.index("skin"))
+    skin_mat[shorts] = material_names.index("shorts")
+    if SEX == "female":
+        # Sports top: the torso from under the bust to the upper chest.
+        torso_ix = [BONE_NAMES.index(b) for b in ("spine_01", "spine_02", "spine_03",
+                                                  "clavicle_l", "clavicle_r")]
+        on_torso = skin_w[skin["faces"]][:, :, torso_ix].sum(axis=2).mean(axis=1) > 0.6
+        top = on_torso & (centre[:, 2] > bust_lo) & (centre[:, 2] < bust_hi)
+        skin_mat[top] = material_names.index("shorts")
+        # Her clothes sit a little off the skin, so no muscle shows through them.
+        from mesh_util import vertex_normals as _vn
+        sv = skin["verts"]
+        cn = _vn(sv, skin["faces"])
+        best, axis_pt = np.full(len(sv), 1e9), np.zeros_like(sv)
+        for sa, sb in segment_lines():
+            ab = sb - sa
+            t = np.clip(((sv - sa) @ ab) / (ab @ ab), 0, 1)
+            q = sa + t[:, None] * ab
+            d = np.linalg.norm(sv - q, axis=1)
+            closer = d < best
+            best[closer], axis_pt[closer] = d[closer], q[closer]
+        cn *= np.sign(((sv - axis_pt) * cn).sum(axis=1) + 1e-12)[:, None]
+        cloth = np.unique(skin["faces"][skin_mat == material_names.index("shorts")])
+        sv[cloth] += cn[cloth] * 0.007
+    skin_mat[head] = material_names.index("head")
+    # Neck bands: band 1 sits just under the head (most solid), band N lowest.
+    near_neck = (np.abs(centre[:, 0]) < 0.14) & ~head & ~shorts
+    for i in range(1, NECK_BANDS + 1):
+        lo, hi = neck_z - NECK_FADE * i / NECK_BANDS, neck_z - NECK_FADE * (i - 1) / NECK_BANDS
+        band = near_neck & (centre[:, 2] > lo) & (centre[:, 2] <= hi)
+        skin_mat[band] = material_names.index(f"neck{i}")
+    all_verts.append(skin["verts"])
+    all_faces.append(skin["faces"] + offset)
+    all_mats.append(skin_mat)
+    all_w.append(skin_w)
+    skin_range = (offset, offset + len(skin["verts"]))
+    if os.environ.get("SURFACE_DUMP"):
+        np.savez(os.environ["SURFACE_DUMP"], skin_v=skin["verts"], skin_f=skin["faces"], skin_mat=skin_mat,
+                 mat_names=np.array(material_names), head=head,
+                 mv=np.concatenate([p["verts"] for p in parts]),
+                 mg=np.concatenate([np.full(len(p["verts"]), group_of(p)) for p in parts]))
+    offset += len(skin["verts"])
+    head_bone = BONE_NAMES.index("head")
+
+
+    def add_rigid(mat, v, f):
+        """A piece that moves with the head."""
+        global offset
+        all_verts.append(v)
+        all_faces.append(f + offset)
+        all_mats.append(np.full(len(f), material_names.index(mat)))
+        w = np.zeros((len(v), len(BONE_NAMES)))
+        w[:, head_bone] = 1
+        all_w.append(w)
+        offset += len(v)
+
+
+    if True:
+        for c, r in male_eyes:
+            fwd = np.array([0.06 if c[0] > 0 else -0.06, -1.0, 0.0])
+            for mat, (v, f) in real_head.eyeball(c, r * 0.97, fwd).items():
+                add_rigid(mat, v, f)
+
+
+    # --- hair -------------------------------------------------------------------
+    def smooth_field(field, faces, n_verts, rounds):
+        """Average a per-vertex field with its mesh neighbours a few times."""
+        from scipy.sparse import coo_matrix, identity
+        i = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2], faces[:, 1], faces[:, 2], faces[:, 0]])
+        j = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0], faces[:, 0], faces[:, 1], faces[:, 2]])
+        adj = coo_matrix((np.ones(len(i)), (i, j)), shape=(n_verts, n_verts)).tocsr()
+        adj.data[:] = 1.0
+        adj = adj + identity(n_verts, format="csr")
+        deg = np.asarray(adj.sum(axis=1)).ravel()
+        for _ in range(rounds):
+            field = adj @ field / (deg[:, None] if field.ndim == 2 else deg)
+        return field
+
+
+    # Scalp: head skin above a hairline that runs from the forehead down to the
+    # nape. Each style is a copy of it pushed out along the (smoothed) normals,
+    # thinning to nothing at the hairline so the edge blends into the skin.
+    if True:
+        head_faces = skin["faces"][head]
+        head_v = np.unique(head_faces)
+        hv = skin["verts"]
+        top_z = hv[head_v, 2].max()
+        front_y, back_y = hv[head_v, 1].min(), hv[head_v, 1].max()
+        along = np.clip((hv[:, 1] - front_y) / (back_y - front_y), 0, 1)   # 0 forehead .. 1 back
+        front_hl = top_z - (0.072 if FEMALE else 0.085)   # hers is pulled back
+        hairline = front_hl + ((C1[2] + 0.005) - front_hl) * along ** 1.15
+        above = hv[:, 2] - hairline
+        scalp_faces = head_faces[(above[head_faces] > 0).all(axis=1)]
+        scalp_n = smooth_field(vertex_normals(hv, skin["faces"]), skin["faces"], len(hv), 6)
+        scalp_n /= np.maximum(np.linalg.norm(scalp_n, axis=1, keepdims=True), 1e-12)
+        taper = np.clip(above / 0.03, 0, 1)
+        taper = taper * taper * (3 - 2 * taper)
+        on_top = np.clip(above / 0.08, 0, 1)
+        for style, (base, extra) in HAIR_STYLES.items():
+            used = np.unique(scalp_faces)
+            remap = -np.ones(len(hv), int)
+            remap[used] = np.arange(len(used))
+            lift = (base + extra * on_top[used]) * taper[used] + 0.0008
+            all_verts.append(hv[used] + scalp_n[used] * lift[:, None])
+            all_faces.append(remap[scalp_faces] + offset)
+            all_mats.append(np.full(len(scalp_faces), material_names.index(style)))
+            all_w.append(skin_w[used])
+            offset += len(used)
+        if FEMALE:
+            # Ponytail: from inside the back of the head, out and down.
+            back = hv[head_v][hv[head_v, 2] > top_z - 0.09]
+            by = back[:, 1].max()
+            z0 = top_z - 0.07
+            pts = [[0, by - 0.03, z0 + 0.01], [0, by + 0.015, z0 - 0.005], [0, by + 0.04, z0 - 0.04],
+                   [0, by + 0.05, z0 - 0.10], [0, by + 0.045, z0 - 0.17], [0, by + 0.035, z0 - 0.23]]
+            from mesh_util import tube
+            tv, tf = tube(pts, [0.022, 0.024, 0.022, 0.018, 0.013, 0.007], 14)
+            add_rigid("hair_ponytail", tv, tf)
 
 
 # ---------------------------------------------------------------- props ----
@@ -1038,6 +1348,58 @@ mesh.polygons.foreach_set("material_index", MAT.astype(np.int32))
 mesh.polygons.foreach_set("use_smooth", np.ones(len(F), dtype=bool))
 mesh.update(calc_edges=True)
 mesh.validate()
+if QBODY:
+    UVS = np.concatenate([u if u is not None else np.zeros((len(v), 2)) for u, v in
+                          zip(all_uv + [None] * (len(all_verts) - len(all_uv)), all_verts)])
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    loop_uv = UVS[F.ravel()].copy()
+    loop_uv[:, 1] = 1.0 - loop_uv[:, 1]          # glTF V runs down, Blender's up
+    uv_layer.data.foreach_set("uv", loop_uv.astype(np.float32).ravel())
+
+TEXTURES = {}
+if QBODY:
+    # Quaternius' skin texture without its colour (the app sets the tone),
+    # its normal map, and the hair texture in grey (the app sets the colour).
+    from PIL import Image, ImageOps
+    tex_dir = os.path.join(os.path.dirname(os.path.abspath(OUT)) if False else
+                           os.environ.get("TMPDIR", "/tmp"), "gympath_textures_" + SEX)
+    os.makedirs(tex_dir, exist_ok=True)
+
+    def grey(src, dst, size=1024, gain=1.0):
+        im = ImageOps.grayscale(Image.open(src).convert("RGB")).resize((size, size), Image.LANCZOS)
+        a = np.asarray(im).astype(float)
+        ref = np.percentile(a, 90)
+        a = np.clip(a / max(ref, 1) * 255 * gain, 0, 255).astype(np.uint8)
+        Image.fromarray(a).convert("RGB").save(dst, quality=88)
+        return dst
+
+    def resized(src, dst, size=1024):
+        Image.open(src).convert("RGB").resize((size, size), Image.LANCZOS).save(dst, quality=92)
+        return dst
+    TEXTURES["skin"] = grey(os.path.join(QCHAR.tex_dir, q_body.SKIN_TEXTURE[SEX]), os.path.join(tex_dir, "skin.jpg"))
+    TEXTURES["skin_n"] = resized(os.path.join(QCHAR.tex_dir, q_body.NORMAL_TEXTURE[SEX]), os.path.join(tex_dir, "skin_n.jpg"))
+    for k in (1, 2):
+        TEXTURES[f"hair{k}"] = grey(os.path.join(QCHAR.tex_dir, f"T_Hair_{k}_BaseColor.png"),
+                                    os.path.join(tex_dir, f"hair{k}.jpg"), 512, 0.95)
+        TEXTURES[f"hair{k}_n"] = resized(os.path.join(QCHAR.tex_dir, f"T_Hair_{k}_Normal.png"),
+                                         os.path.join(tex_dir, f"hair{k}_n.jpg"), 512)
+    IMAGES = {k: bpy.data.images.load(v) for k, v in TEXTURES.items()}
+    for k in IMAGES:
+        if k.endswith("_n"):
+            IMAGES[k].colorspace_settings.name = "Non-Color"
+
+
+def textured(m, bsdf, base, normal):
+    nt = m.node_tree
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = IMAGES[base]
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    ntex = nt.nodes.new("ShaderNodeTexImage")
+    ntex.image = IMAGES[normal]
+    nmap = nt.nodes.new("ShaderNodeNormalMap")
+    nt.links.new(ntex.outputs["Color"], nmap.inputs["Color"])
+    nt.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
+
 
 for name in material_names:
     m = bpy.data.materials.new(name)
@@ -1064,7 +1426,14 @@ for name in material_names:
         bsdf.inputs["Roughness"].default_value = 0.9
     if name.startswith("neck"):
         bsdf.inputs["Base Color"].default_value = SKIN_COLOR
-    if name == "skin" or name.startswith("neck"):
+    if QBODY and (name in ("skin", "shorts") or name.replace("_cloth", "") in dict(GROUPS)):
+        textured(m, bsdf, "skin", "skin_n")
+        bsdf.inputs["Roughness"].default_value = 0.6
+    elif QBODY and (name == "brows" or name.startswith("hair_")):
+        atlas = "hair2" if QCHAR.hair[name][0]["material"] == "MI_Hair_2" else "hair1"
+        textured(m, bsdf, atlas, atlas + "_n")
+        bsdf.inputs["Roughness"].default_value = 0.8
+    elif name == "skin" or name.startswith("neck"):
         bsdf.inputs["Alpha"].default_value = SKIN_COLOR[3]
         if hasattr(m, "surface_render_method"):
             m.surface_render_method = "BLENDED"
@@ -1312,6 +1681,7 @@ bpy.ops.export_scene.gltf(
     export_morph_tangent=False,
     export_cameras=False,
     export_lights=False,
+    export_image_format="JPEG" if QBODY else "AUTO",
 )
 print("wrote", OUT, round(os.path.getsize(OUT) / 1e6, 2), "MB;",
       len(mesh.vertices), "vertices,", len(mesh.polygons), "triangles")

@@ -33,7 +33,7 @@ class _AvatarScreenState extends State<AvatarScreen> {
   Avatar get _avatar => _draft.value;
 
   String get _target =>
-      _avatar.sex == AvatarSex.male ? '0m 1.55m 0m' : '0m 1.41m 0m';
+      _avatar.sex == AvatarSex.male ? '0m 1.69m 0m' : '0m 1.64m 0m';
 
   @override
   void initState() {

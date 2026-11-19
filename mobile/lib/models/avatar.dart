@@ -17,9 +17,8 @@ class AvatarOption {
 
 enum AvatarSex { male, female }
 
-/// The user's avatar. The body is the same for everyone of a sex (a normal
-/// build with see-through skin, so the working muscles show); the head is
-/// the user's own: skin tone, eye colour and hair.
+/// The user's avatar: a character of their sex (the working muscles light up
+/// on its skin) with their own skin tone, eye colour and hair.
 ///
 /// Kept on the phone for now (AvatarStore). [toJson] is the format to sync
 /// to a server later; ids are material names in the 3D models, so they stay
@@ -33,7 +32,7 @@ class Avatar {
 
   const Avatar({
     this.sex = AvatarSex.male,
-    this.skinTone = 0,
+    this.skinTone = 1,
     this.eyeColor = 0,
     this.hair = 'hair_short',
     this.hairColor = 0,
@@ -41,9 +40,9 @@ class Avatar {
 
   static const Avatar standard = Avatar();
   static const Avatar standardFemale =
-      Avatar(sex: AvatarSex.female, hair: 'hair_ponytail');
+      Avatar(sex: AvatarSex.female, hair: 'hair_bun');
 
-  /// The first tone matches the app's graphite body.
+  /// Graphite is a neutral statue-like tone.
   static const List<AvatarSwatch> skinTones = [
     AvatarSwatch('Graphite', Color(0xFF959AA2)),
     AvatarSwatch('Light', Color(0xFFF1C7A8)),
@@ -68,10 +67,10 @@ class Avatar {
     AvatarOption('Short', 'hair_short'),
   ];
 
-  /// The female figure has one fixed look: a ponytail (its colour is still
-  /// the user's).
+  /// The female figure has one fixed look: hair in buns (its colour is
+  /// still the user's).
   static const List<AvatarOption> femaleHair = [
-    AvatarOption('Ponytail', 'hair_ponytail'),
+    AvatarOption('Buns', 'hair_bun'),
   ];
 
   static List<AvatarOption> hairStylesFor(AvatarSex sex) =>

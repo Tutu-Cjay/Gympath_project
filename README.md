@@ -76,7 +76,8 @@ Details: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 ## License
 
 Proprietary, except `mobile/assets/models/anatomy_male.glb` and
-`anatomy_female.glb`: derived from BodyParts3D, © The Database Center for Life
-Science, licensed under CC Attribution-Share Alike 2.1 Japan, and MakeHuman data
-(MPFB2, CC0) for the female body (rebuild with
+`anatomy_female.glb`: the characters, hair and textures are Quaternius'
+Universal Base Characters (CC0); the muscle outlines on them derive from
+BodyParts3D, © The Database Center for Life Science, licensed under
+CC Attribution-Share Alike 2.1 Japan (rebuild with
 `tools/build_anatomy_model.py`).

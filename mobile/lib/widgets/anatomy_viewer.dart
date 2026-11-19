@@ -201,35 +201,28 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   static String _script(CableExercise initial, Map<String, Object> avatar) => '''
 (function () {
   const mv = document.querySelector('#gp');
-  // Resting muscles: grey under the skin, anatomical red with the skin off.
-  const UNDER_SKIN = [0.42, 0.43, 0.46];
-  const BARE = [0.42, 0.22, 0.20];
-  // The body is the same for everyone of a sex: see-through graphite skin
-  // over a normal build. The head is the user's avatar.
-  const BODY_SKIN = [0.30, 0.32, 0.36];
-  const BODY_ALPHA = 0.49;
+  // The body is opaque; each muscle group is a region of its skin. Resting,
+  // a region is just skin; working, it lights up in its own shape and keeps
+  // the skin's shading. With the skin "off" every region shows in
+  // anatomical red, a full muscle map.
+  const BARE = [0.42, 0.13, 0.11];
   const SHORTS = [0.05, 0.05, 0.06];
   let avatar = ${jsonEncode(avatar)};
-  // Materials that are not muscles: body surface, clothing, the avatar's
-  // head and eyes, and the machine. Of the hair_* styles only the chosen
-  // one shows.
-  const DRESS = ['skin', 'head', 'shorts', 'iris'];
-  // Neck bands between the see-through body and the solid head (neck1 just
-  // under the head ... neckN lowest); each is a step more solid.
-  const NECK_BANDS = 8;
-  const FIXED = ['shorts', 'equipment', 'cable', 'tracker', 'pad', 'sclera', 'pupil', 'lashes'];
+  // Not muscles: skin, underwear, eyes, brows, hair styles (only the chosen
+  // one shows) and the machine. A group's region over the underwear is
+  // "<group>_cloth": it lights up like the group, from the cloth's colour.
+  const DRESS = ['skin', 'shorts', 'iris', 'brows'];
+  const FIXED = ['equipment', 'cable', 'tracker', 'pad', 'sclera', 'pupil'];
   const PRIMARY = [0.0, 1.0, 0.53];
   const SECONDARY = [1.0, 0.72, 0.20];
   const PULL = ${RepTimeline.pullStart}, HOLD = ${RepTimeline.holdStart};
   const RETURN = ${RepTimeline.returnStart}, REST = ${RepTimeline.restStart};
   let cfg = ${jsonEncode(AnatomyViewerController._config(initial))};
-  // Resting muscles under the skin take on the body's skin colour.
-  function underSkin() {
-    return [0, 1, 2].map(function (i) {
-      return BODY_SKIN[i] * 0.7 + UNDER_SKIN[i] * 0.3;
-    });
+  function mix(a, b, t) {
+    return [0, 1, 2].map(function (i) { return a[i] + (b[i] - a[i]) * t; });
   }
-  let BASE = underSkin(), skinOn = true, dressDirty = true;
+  function restingRegion() { return skinOn ? avatar.skin : BARE; }
+  let skinOn = true, dressDirty = true, BASE = null;
   let focus = null, last = {}, lastSent = 0, paused = false, heat = null;
   // Live mode: the figure eases towards the progress the tracker reports.
   let live = false, target = 0, shown = 0, lastFrame = 0;
@@ -254,30 +247,19 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   function paint() {
     if (!mv.model) return;
     const c = contraction(repTime());
-    const skinAlpha = skinOn ? BODY_ALPHA : 0;
     const dress = dressDirty;
     dressDirty = false;
+    if (dress) { BASE = restingRegion(); last = {}; }
     for (const m of mv.model.materials) {
       const n = m.name;
-      const neck = n.indexOf('neck') === 0 ? parseInt(n.slice(4), 10) : 0;
       const hair = n.indexOf('hair_') === 0;
-      if (DRESS.indexOf(n) >= 0 || neck > 0 || hair) {
+      if (DRESS.indexOf(n) >= 0 || hair) {
         if (dress) {
-          let k = BODY_SKIN, a = 1;
-          if (n === 'skin') a = skinAlpha;
+          let k = avatar.skin, a = 1;
+          if (n === 'iris') k = avatar.eyeColor;
           else if (n === 'shorts') k = SHORTS;
-          else if (n === 'head') k = avatar.skin;
-          else if (n === 'iris') k = avatar.eyeColor;
-          else if (neck > 0) {
-            // The neck blends the avatar's solid head into the body's
-            // see-through skin: colour and opacity both, band by band.
-            let f = 1 - neck / (NECK_BANDS + 1);
-            f = f * f * (3 - 2 * f);
-            k = [0, 1, 2].map(function (i) {
-              return BODY_SKIN[i] + (avatar.skin[i] - BODY_SKIN[i]) * f;
-            });
-            a = skinAlpha + (1 - skinAlpha) * f;
-          } else {
+          else if (n === 'brows') k = mix(avatar.hairColor, [0, 0, 0], 0.2);
+          else if (hair) {
             const on = n === avatar.hair;
             k = avatar.hairColor;
             a = on ? 1 : 0;
@@ -288,30 +270,29 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
         continue;
       }
       if (FIXED.indexOf(n) >= 0) continue;
+      const cloth = n.slice(-6) === '_cloth';
+      const g = cloth ? n.slice(0, -6) : n;
       let k = 0, tone = PRIMARY;
-      if (heat) { k = Math.min(1, Math.max(0, heat[n] || 0)); }
-      else if (cfg.primary.indexOf(n) >= 0) { k = 0.55 + 0.45 * c; }
-      else if (cfg.secondary.indexOf(n) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
-      if (focus) { k = n === focus ? 1 : k * 0.15; }
+      if (heat) { k = Math.min(1, Math.max(0, heat[g] || 0)); }
+      else if (cfg.primary.indexOf(g) >= 0) { k = 0.55 + 0.45 * c; }
+      else if (cfg.secondary.indexOf(g) >= 0) { k = 0.30 + 0.30 * c; tone = SECONDARY; }
+      if (focus) { k = g === focus ? 1 : k * 0.15; }
+      if (cloth) k *= 0.8;
       const key = Math.round(k * 40) + (tone === PRIMARY ? 'p' : 's');
       if (last[n] === key) continue;
       last[n] = key;
-      m.pbrMetallicRoughness.setBaseColorFactor([
-        BASE[0] + (tone[0] - BASE[0]) * k,
-        BASE[1] + (tone[1] - BASE[1]) * k,
-        BASE[2] + (tone[2] - BASE[2]) * k, 1]);
-      // Glow strongly enough to read through the skin layer.
-      const glow = skinAlpha > 0 ? k : k * 0.3;
+      const col = mix(cloth ? (skinOn ? SHORTS : BARE) : BASE, tone, k * 0.8);
+      m.pbrMetallicRoughness.setBaseColorFactor([col[0], col[1], col[2], 1]);
+      const glow = k * 0.22;
       m.setEmissiveFactor([tone[0] * glow, tone[1] * glow, tone[2] * glow]);
-      if (m.setEmissiveStrength) m.setEmissiveStrength(skinAlpha > 0 ? 2.0 : 1.0);
     }
   }
-  // Show or hide the machine (everything but the body and the shorts).
+  // Show or hide the machine (everything but the body).
   let original = null;
   function machine(on) {
     if (!mv.model) return;
     const parts = mv.model.materials.filter(function (m) {
-      return FIXED.indexOf(m.name) >= 0 && m.name !== 'shorts';
+      return ['equipment', 'cable', 'tracker', 'pad'].indexOf(m.name) >= 0;
     });
     if (!original) {
       original = {};
@@ -366,12 +347,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     camera: function (o, t) { mv.cameraOrbit = o; mv.cameraTarget = t; },
     focus: function (g) { focus = g; last = {}; },
     heat: function (h) { heat = h; last = {}; machine(!h); },
-    skin: function (on) {
-      skinOn = on;
-      BASE = on ? underSkin() : BARE;
-      dressDirty = true;
-      last = {};
-    },
+    skin: function (on) { skinOn = on; dressDirty = true; },
     avatar: function (a) { avatar = a; dressDirty = true; },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
