@@ -41,6 +41,10 @@ jobs:
           flutter pub get
           # Everything (CanvasKit included) is served with the app: no CDN.
           flutter build web --release --no-web-resources-cdn --pwa-strategy none
+          # The models also as glTF JSON (for hosts that serve no binary).
+          for f in build/web/assets/assets/models/*.glb; do
+            python3 ../tools/glb_to_gltf_json.py "$f" "${f%.glb}.json"
+          done
 
       - name: Upload the build
         uses: actions/upload-artifact@v4

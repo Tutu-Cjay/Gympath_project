@@ -161,8 +161,11 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     return ModelViewer(
       key: ValueKey(_id),
       id: _id,
-      // Flutter web serves bundled assets under assets/.
-      src: '${kIsWeb ? 'assets/' : ''}assets/models/anatomy_${_sex.name}.glb',
+      // In a browser: Flutter web serves bundled assets under assets/, and
+      // the web build carries each model as glTF JSON (see web-preview.yml).
+      src: kIsWeb
+          ? 'assets/assets/models/anatomy_${_sex.name}.json'
+          : 'assets/models/anatomy_${_sex.name}.glb',
       alt: 'Figure performing a cable exercise',
       backgroundColor: AnatomyViewer.background,
       loading: Loading.eager,
