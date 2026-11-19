@@ -413,14 +413,25 @@ def segment_lines():
 # torso maps cross-section onto cross-section along the spine. From here on
 # the rig, exercises and props use its joints.
 QBODY = os.environ.get("ANATOMY_BODY", "quaternius") == "quaternius"
+# How much farther out a hanging arm swings (upper arm, forearm), per unit of
+# "pointing down", on the broader Quaternius build.
+ARM_SPREAD = (0.36, 0.22) if QBODY else (0.13, 0.10)
 QUAT_ROOT = os.environ.get("QUATERNIUS", "")
 if QBODY:
     import q_body  # noqa: E402
     QCHAR = q_body.Character(QUAT_ROOT, SEX)
     aims = {}
     for s_ in "lr":
-        aims[f"upperarm_{s_}"] = J[f"elbow_{s_}"] - J[f"shoulder_{s_}"]
-        aims[f"lowerarm_{s_}"] = J[f"wrist_{s_}"] - J[f"elbow_{s_}"]
+        # Its build is broader than the anatomy figure's: the arms hang out a
+        # little more (ARM_SPREAD) so they clear the lats and the armpit
+        # keeps its shape.
+        up = J[f"elbow_{s_}"] - J[f"shoulder_{s_}"]
+        lo = J[f"wrist_{s_}"] - J[f"elbow_{s_}"]
+        sx = 1 if s_ == "l" else -1
+        up = up / np.linalg.norm(up) + np.array([sx * ARM_SPREAD[0], 0, 0])
+        lo = lo / np.linalg.norm(lo) + np.array([sx * ARM_SPREAD[1], 0, 0])
+        aims[f"upperarm_{s_}"] = up
+        aims[f"lowerarm_{s_}"] = lo
         aims[f"thigh_{s_}"] = J[f"knee_{s_}"] - J[f"hip_{s_}"]
         aims[f"calf_{s_}"] = J[f"ankle_{s_}"] - J[f"knee_{s_}"]
     QCHAR.pose(aims)
@@ -964,6 +975,7 @@ if QBODY:
     # neighbouring groups, so the outlines are clean curves.
     RAY_START, RAY_DEPTH = 0.025, 0.08     # m outside the skin, m inside it
     LINE = 0.12                            # gap between groups (label units)
+    GAP_FILL_RINGS = 4
     from mathutils import Vector as _V
     from mathutils.bvhtree import BVHTree
     qb = QCHAR.body
@@ -1024,6 +1036,15 @@ if QBODY:
         for k in np.unique(comp[small]):
             members = comp == k
             lab[members] = int(around[members].sum(axis=0).argmax())
+    # Bare strips the rays missed between groups (the flanks under the arms,
+    # where the broader build has more body than the anatomy's muscles) are
+    # filled from the groups beside them, a few rings at a time.
+    for _ in range(GAP_FILL_RINGS):
+        bare = (lab == NONE) & ~off_body
+        votes = np.asarray((adj @ onehot(lab)).todense())
+        votes[:, NONE] = 0
+        take = bare & (votes.sum(axis=1) > 0)
+        lab[take] = votes[take].argmax(axis=1)
     label = np.where(lab == NONE, -1, lab)
     print("skin points over a muscle:", round(float((label >= 0).mean()), 2))
     # Smoothed share of each group around every point.
@@ -1664,10 +1685,10 @@ def solve_pose(ex_name, c):
     for s, sx in (("l", 1.0), ("r", -1.0)):
         for bone, key in ((f"upperarm_{s}", "upper"), (f"lowerarm_{s}", "fore")):
             d = slerp(ex[key][0], ex[key][1], c)
-            if SEX == "female":
-                # Her hips are wider for her shoulders: a hanging arm swings
-                # out a little more so it clears them.
-                d = Vector((d.x + (0.13 if key == "upper" else 0.10) * max(0.0, -d.z), d.y, d.z)).normalized()
+            if SEX == "female" or QBODY:
+                # A hanging arm swings out a little more so it clears the
+                # lats and hips of the broader builds.
+                d = Vector((d.x + ARM_SPREAD[0 if key == "upper" else 1] * max(0.0, -d.z), d.y, d.z)).normalized()
             aims[bone] = Vector((d.x * sx, d.y, d.z))
         aims[f"hand_{s}"] = aims[f"lowerarm_{s}"]
         if seat:
