@@ -1,0 +1,49 @@
+name: Web preview build
+
+# Builds the app for the browser and keeps it as a build artifact
+# (gympath-web). Nothing is published from here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/3d-anatomy-prototype
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.x
+          cache: true
+
+      - name: Add the web platform files that are not in the repo
+        working-directory: mobile
+        run: flutter create --platforms web --project-name gympath .
+
+      - name: Build for the web
+        working-directory: mobile
+        run: |
+          flutter pub get
+          # Everything (CanvasKit included) is served with the app: no CDN.
+          flutter build web --release --no-web-resources-cdn --pwa-strategy none
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gympath-web
+          path: mobile/build/web
+          retention-days: 14

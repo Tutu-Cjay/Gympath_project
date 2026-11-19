@@ -202,7 +202,7 @@ class BleService {
       return _fail('Bluetooth is not supported on this device');
     }
     await _ensurePermissions();
-    if (Platform.isAndroid) {
+    if ((!kIsWeb && Platform.isAndroid)) {
       try {
         await FlutterBluePlus.turnOn();
       } catch (_) {
@@ -226,7 +226,7 @@ class BleService {
     _attachConnectionListener(device);
 
     // Larger MTU so the 60/104-byte motion packet fits one notification.
-    if (Platform.isAndroid) {
+    if ((!kIsWeb && Platform.isAndroid)) {
       try {
         await device.requestMtu(517); // large MTU → bigger OTA chunks
       } catch (_) {}
@@ -315,7 +315,7 @@ class BleService {
   }
 
   Future<void> _ensurePermissions() async {
-    if (!Platform.isAndroid) return;
+    if (!(!kIsWeb && Platform.isAndroid)) return;
     final permissions = <Permission>[
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
@@ -474,7 +474,7 @@ class BleService {
 
   /// Ask Android for the fastest connection interval (OTA throughput).
   Future<void> requestHighThroughput() async {
-    if (_device == null || !Platform.isAndroid) return;
+    if (_device == null || !(!kIsWeb && Platform.isAndroid)) return;
     try {
       await _device!.requestConnectionPriority(
           connectionPriorityRequest: ConnectionPriority.high);

@@ -8,17 +8,24 @@ import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
 import '../models/avatar.dart';
 import '../models/cable_exercise.dart';
 import '../services/avatar_store.dart';
+import 'web_bridge.dart';
 
 /// Drives an [AnatomyViewer]: which exercise is shown, how it plays, and (in
 /// live mode) which point of the repetition the figure is at.
 class AnatomyViewerController {
   WebViewController? _web;
+  String _id = 'gp';
   CableExercise? _exercise;
   bool _live = false;
   double _progress = 0;
 
   void _run(String call) {
-    _web?.runJavaScript('if (window.gp) { window.gp.$call; }');
+    final js = 'if (window.gp_$_id) { window.gp_$_id.$call; }';
+    if (kIsWeb) {
+      runPageScript(js);
+    } else {
+      _web?.runJavaScript(js);
+    }
   }
 
   static Map<String, Object> _config(CableExercise e) => {
@@ -119,6 +126,10 @@ class AnatomyViewer extends StatefulWidget {
 class _AnatomyViewerState extends State<AnatomyViewer> {
   late Widget _viewer;
   late AvatarSex _sex;
+  // Each model-viewer element gets its own id (a browser page can hold more
+  // than one viewer; each phone WebView holds one).
+  static int _count = 0;
+  String _id = 'gp';
 
   ValueListenable<Avatar> get _avatar =>
       widget.avatar ?? AvatarStore.instance.avatar;
@@ -137,10 +148,21 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   /// whole model, so everything else goes through JavaScript.
   Widget _build() {
     final e = widget.controller._exercise ?? widget.exercise;
+    if (kIsWeb) stopListening('GP_$_id');
+    _id = 'gp${_count++}';
+    widget.controller._id = _id;
+    final script = _script(e, _avatar.value.toJs(), _id);
+    if (kIsWeb) {
+      // In a browser the page script is not run from the model-viewer's
+      // HTML: start it here (it waits for its element) and listen to it.
+      listenToPage('GP_$_id', _onMessage);
+      runPageScript(script);
+    }
     return ModelViewer(
-      key: ValueKey(_sex),
-      id: 'gp',
-      src: 'assets/models/anatomy_${_sex.name}.glb',
+      key: ValueKey(_id),
+      id: _id,
+      // Flutter web serves bundled assets under assets/.
+      src: '${kIsWeb ? 'assets/' : ''}assets/models/anatomy_${_sex.name}.glb',
       alt: 'Figure performing a cable exercise',
       backgroundColor: AnatomyViewer.background,
       loading: Loading.eager,
@@ -158,7 +180,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       shadowIntensity: 0.7,
       shadowSoftness: 0.9,
       debugLogging: false,
-      relatedJs: _script(e, _avatar.value.toJs()),
+      relatedJs: kIsWeb ? null : script,
       javascriptChannels: {
         JavascriptChannel('GP', onMessageReceived: (m) => _onMessage(m.message)),
       },
@@ -183,6 +205,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   @override
   void dispose() {
     _avatar.removeListener(_onAvatar);
+    if (kIsWeb) stopListening('GP_$_id');
     super.dispose();
   }
 
@@ -198,9 +221,11 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
 
   /// Page script: tints the muscle materials every frame from the rep time and
   /// reports that time back. The timeline numbers mirror [RepTimeline].
-  static String _script(CableExercise initial, Map<String, Object> avatar) => '''
+  static String _script(CableExercise initial, Map<String, Object> avatar, String id) => '''
 (function () {
-  const mv = document.querySelector('#gp');
+const ID = ${jsonEncode(id)};
+function start(mv) {
+  const channel = function () { return window['GP_' + ID] || window.GP; };
   // The body is opaque; each muscle group is a region of its skin. Resting,
   // a region is just skin; working, it lights up in its own shape and keeps
   // the skin's shading. With the skin "off" every region shows in
@@ -335,14 +360,15 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       mv.currentTime = timeFor(shown) * (mv.duration || 4);
     }
     paint();
-    if (now - lastSent > 90 && window.GP) {
+    if (!mv.isConnected) return;        // its view was closed
+    if (now - lastSent > 90 && channel()) {
       lastSent = now;
-      GP.postMessage(JSON.stringify({ t: repTime(), ready: !!mv.model }));
+      channel().postMessage(JSON.stringify({ t: repTime(), ready: !!mv.model }));
     }
     requestAnimationFrame(tick);
   }
   function resume() { if (live || paused) { mv.pause(); } else { mv.play(); } }
-  mv.addEventListener('load', function () {
+  function onLoad() {
     last = {};
     dressDirty = true;
     original = null;
@@ -350,8 +376,8 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     if (heat) machine(false);
     mv.animationName = cfg.animation;
     resume();
-  });
-  window.gp = {
+  }
+  const api = {
     exercise: function (c) {
       cfg = c; focus = null; last = {};
       mv.animationName = c.animation;
@@ -376,7 +402,25 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
   };
+  window['gp_' + ID] = api;
+  window.gp = api;
+  mv.addEventListener('load', onLoad);
+  if (mv.loaded) onLoad();
   requestAnimationFrame(tick);
+}
+// Wait for the element (in a browser it is attached after this runs).
+function deepFind(root) {
+  const el = root.querySelector('#' + ID);
+  if (el) return el;
+  for (const n of root.querySelectorAll('*')) {
+    if (n.shadowRoot) { const r = deepFind(n.shadowRoot); if (r) return r; }
+  }
+  return null;
+}
+(function find() {
+  const el = document.getElementById(ID) || deepFind(document);
+  if (el) start(el); else setTimeout(find, 100);
+})();
 })();
 ''';
 
