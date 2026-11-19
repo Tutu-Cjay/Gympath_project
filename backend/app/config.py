@@ -32,3 +32,7 @@ DATABASE_URL = os.environ.get(
 
 # Daily rep goal mirrored from the mobile app (WorkoutStore.dailyRepGoal)
 DAILY_REP_GOAL = 60
+
+# A week counts towards the week streak with at least this many training days
+# (Monday to Sunday). Mirrored by the app (WorkoutStore.weekGoalDays).
+WEEK_GOAL_DAYS = 3

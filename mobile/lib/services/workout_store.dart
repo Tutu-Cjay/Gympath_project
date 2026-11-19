@@ -16,6 +16,7 @@ class WorkoutStats {
   final int totalReps;
   final double totalVolumeKg;
   final int weekDays; // days trained in the last 7 days
+  final WeekStreak weekStreak;
 
   const WorkoutStats({
     required this.dayNumber,
@@ -28,6 +29,8 @@ class WorkoutStats {
     required this.totalReps,
     required this.totalVolumeKg,
     required this.weekDays,
+    this.weekStreak = const WeekStreak(
+        current: 0, best: 0, daysThisWeek: 0, thisWeek: [false, false, false, false, false, false, false]),
   });
 
   static const empty = WorkoutStats(
@@ -78,6 +81,10 @@ class WorkoutStore {
 
   /// Daily rep goal used by the dashboard's "today's workout" ring.
   static const int dailyRepGoal = 60;
+
+  /// A week counts towards the week streak with this many training days
+  /// (same rule as the server's leaderboard, backend WEEK_GOAL_DAYS).
+  static const int weekGoalDays = 3;
 
   final ValueNotifier<WorkoutStats> stats =
       ValueNotifier<WorkoutStats>(WorkoutStats.empty);
@@ -193,6 +200,7 @@ class WorkoutStore {
       totalReps: _sessions.fold<int>(0, (a, s) => a + s.reps),
       totalVolumeKg: _sessions.fold<double>(0, (a, s) => a + s.volumeKg),
       weekDays: weekDays,
+      weekStreak: WeekStreak.of(daysWithSession, now, weekGoalDays),
     );
   }
 

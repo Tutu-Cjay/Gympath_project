@@ -9,6 +9,60 @@ DateTime dayOf(DateTime t) => DateTime(t.year, t.month, t.day);
 DateTime weekStart(DateTime t) =>
     DateTime(t.year, t.month, t.day - (t.weekday - DateTime.monday));
 
+/// Weeks in a row (Monday to Sunday) with at least [goal] training days.
+class WeekStreak {
+  /// The current run. The week in progress does not break it before it is
+  /// over: until it reaches the goal, the run up to last week counts.
+  final int current;
+  final int best;
+
+  /// Training days so far this week.
+  final int daysThisWeek;
+
+  /// Which days of this week (Monday first) had training.
+  final List<bool> thisWeek;
+
+  const WeekStreak(
+      {required this.current,
+      required this.best,
+      required this.daysThisWeek,
+      required this.thisWeek});
+
+  static WeekStreak of(Iterable<DateTime> trainingDays, DateTime now, int goal) {
+    final days = trainingDays.map(dayOf).where((d) => !d.isAfter(now)).toSet();
+    final perWeek = <DateTime, int>{};
+    for (final d in days) {
+      final w = weekStart(d);
+      perWeek[w] = (perWeek[w] ?? 0) + 1;
+    }
+    DateTime back(DateTime w) => DateTime(w.year, w.month, w.day - 7);
+    final thisWeek = weekStart(now);
+    var cursor = (perWeek[thisWeek] ?? 0) >= goal ? thisWeek : back(thisWeek);
+    var current = 0;
+    while ((perWeek[cursor] ?? 0) >= goal) {
+      current++;
+      cursor = back(cursor);
+    }
+    final met = perWeek.keys.where((w) => perWeek[w]! >= goal).toList()..sort();
+    var best = 0, run = 0;
+    DateTime? prev;
+    for (final w in met) {
+      run = prev != null && back(w) == prev ? run + 1 : 1;
+      if (run > best) best = run;
+      prev = w;
+    }
+    return WeekStreak(
+      current: current,
+      best: best,
+      daysThisWeek: perWeek[thisWeek] ?? 0,
+      thisWeek: [
+        for (var i = 0; i < 7; i++)
+          days.contains(DateTime(thisWeek.year, thisWeek.month, thisWeek.day + i)),
+      ],
+    );
+  }
+}
+
 /// Best values of one exercise on one day: a point on the progress charts.
 class DayBest {
   final DateTime day;

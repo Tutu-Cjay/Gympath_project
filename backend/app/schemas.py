@@ -38,6 +38,8 @@ class SessionCreate(BaseModel):
     performance: str = Field(max_length=4, default="-")
     bonus: int = Field(ge=0, default=0)
     duration_sec: int = Field(ge=0, default=0)
+    weight_kg: float = Field(ge=0, le=1000, default=0)
+    client_id: str | None = Field(default=None, max_length=80)
     client_timestamp: datetime | None = None
 
 
@@ -50,6 +52,8 @@ class SessionOut(BaseModel):
     performance: str
     bonus: int
     duration_sec: int
+    weight_kg: float = 0
+    client_id: str | None = None
     client_timestamp: datetime
     created_at: datetime
 
@@ -70,6 +74,10 @@ class StatsOut(BaseModel):
     week_sessions: int
     avg_accuracy: float
     daily_rep_goal: int
+    week_streak: int = 0
+    best_week_streak: int = 0
+    days_this_week: int = 0
+    week_goal_days: int = 3
 
 
 class LeaderboardEntry(BaseModel):
@@ -78,3 +86,8 @@ class LeaderboardEntry(BaseModel):
     points: int
     total_reps: int
     is_me: bool = False
+    # Weeks in a row with at least week_goal_days training days.
+    week_streak: int = 0
+    best_week_streak: int = 0
+    days_this_week: int = 0
+    week_goal_days: int = 3

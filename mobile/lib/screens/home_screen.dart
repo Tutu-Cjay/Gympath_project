@@ -5,6 +5,7 @@ import '../widgets/bottom_nav_bar.dart';
 import '../widgets/ble_status_chip.dart';
 import '../services/routine_store.dart';
 import '../services/workout_store.dart';
+import 'leaderboard_screen.dart';
 import 'plan_screen.dart';
 import 'choose_workout_screen.dart';
 import 'firmware_update_screen.dart';
@@ -135,46 +136,8 @@ class _HomeTab extends StatelessWidget {
                         ],
                       ),
                       SizedBox(height: Responsive.h(context, 24)),
-                      // Streak card
-                      Container(
-                        padding: EdgeInsets.all(Responsive.w(context, 20)),
-                        decoration: BoxDecoration(
-                          color: AppTheme.cardBg,
-                          borderRadius:
-                              BorderRadius.circular(Responsive.r(context, 16)),
-                          border: Border.all(color: AppTheme.cardBgLight),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(Icons.local_fire_department_rounded,
-                                color: AppTheme.neonGreen,
-                                size: Responsive.r(context, 40)),
-                            SizedBox(width: Responsive.w(context, 16)),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${stats.streakDays} day streak',
-                                  style: const TextStyle(
-                                    color: AppTheme.textPrimary,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                Text(
-                                  stats.streakDays > 0
-                                      ? 'Keep it up!'
-                                      : 'Start your first workout',
-                                  style: const TextStyle(
-                                    color: AppTheme.textSecondary,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
+                      // Week streak card (opens the leaderboard)
+                      _WeekStreakCard(stats: stats),
                       SizedBox(height: Responsive.h(context, 20)),
                       // Today's workout progress
                       Container(
@@ -329,6 +292,65 @@ class _HomeTab extends StatelessWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// Weeks in a row with enough training days, this week's days, and the way
+/// to the leaderboard.
+class _WeekStreakCard extends StatelessWidget {
+  final WorkoutStats stats;
+  const _WeekStreakCard({required this.stats});
+
+  @override
+  Widget build(BuildContext context) {
+    final w = stats.weekStreak;
+    const goal = WorkoutStore.weekGoalDays;
+    const fire = Color(0xFFFF8A3D);
+    final left = goal - w.daysThisWeek;
+    return InkWell(
+      borderRadius: BorderRadius.circular(Responsive.r(context, 16)),
+      onTap: () => Navigator.push(context,
+          MaterialPageRoute(builder: (_) => const LeaderboardScreen())),
+      child: Container(
+        padding: EdgeInsets.all(Responsive.w(context, 18)),
+        decoration: BoxDecoration(
+          color: AppTheme.cardBg,
+          borderRadius: BorderRadius.circular(Responsive.r(context, 16)),
+          border: Border.all(
+              color: w.current > 0 ? fire.withValues(alpha: .6) : AppTheme.cardBgLight),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.local_fire_department_rounded,
+                color: fire, size: Responsive.r(context, 40)),
+            SizedBox(width: Responsive.w(context, 14)),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('${w.current} week${w.current == 1 ? '' : 's'} streak',
+                    style: const TextStyle(
+                        color: AppTheme.textPrimary,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold)),
+                Text(
+                    left > 0
+                        ? '${w.daysThisWeek}/$goal days this week · $left to go'
+                        : 'This week counts · ${w.daysThisWeek} days',
+                    style: TextStyle(
+                        color: left > 0 ? AppTheme.textSecondary : AppTheme.neonGreen,
+                        fontSize: 13)),
+              ]),
+            ),
+            const Column(children: [
+              Icon(Icons.emoji_events_rounded, color: AppTheme.neonGreen, size: 20),
+              Text('Ranks',
+                  style: TextStyle(color: AppTheme.neonGreen, fontSize: 10)),
+            ]),
+          ]),
+          SizedBox(height: Responsive.h(context, 12)),
+          WeekDots(days: w.thisWeek),
+        ]),
       ),
     );
   }

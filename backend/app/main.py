@@ -8,13 +8,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .database import Base, engine
+from .database import Base, engine, upgrade_schema
 from .routers import auth as auth_router
 from .routers import sessions as sessions_router
 from .routers import stats as stats_router
 
 # create tables on first run (idempotent). For schema changes later, use Alembic.
 Base.metadata.create_all(bind=engine)
+upgrade_schema()
 
 app = FastAPI(
     title="Gympath API",

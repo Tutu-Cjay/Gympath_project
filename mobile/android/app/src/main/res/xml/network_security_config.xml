@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The 3D viewer (model_viewer_plus) serves the bundled model to its WebView
-     from a local HTTP server, so cleartext is allowed for localhost only. -->
+     from a local HTTP server, and the Gympath test server (backend/) runs on
+     a PC on the same Wi-Fi over plain HTTP (http://192.168.x.x:8000), so
+     cleartext is allowed. Switch the server to HTTPS and remove the base
+     config before a public release. -->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

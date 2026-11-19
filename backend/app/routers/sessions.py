@@ -29,6 +29,8 @@ def _to_row(user_id: int, s: SessionCreate) -> WorkoutSession:
         performance=s.performance,
         bonus=s.bonus,
         duration_sec=s.duration_sec,
+        weight_kg=s.weight_kg,
+        client_id=s.client_id,
         client_timestamp=ts,
     )
 
@@ -52,7 +54,21 @@ def create_bulk(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    rows = [_to_row(current.id, s) for s in body.sessions]
+    # Sets already synced (same client_id) are skipped, so the app can resend.
+    ids = [s.client_id for s in body.sessions if s.client_id]
+    seen = set(db.scalars(
+        select(WorkoutSession.client_id).where(
+            WorkoutSession.user_id == current.id,
+            WorkoutSession.client_id.in_(ids),
+        )
+    ).all()) if ids else set()
+    rows = []
+    for s in body.sessions:
+        if s.client_id:
+            if s.client_id in seen:
+                continue
+            seen.add(s.client_id)
+        rows.append(_to_row(current.id, s))
     db.add_all(rows)
     db.commit()
     for r in rows:

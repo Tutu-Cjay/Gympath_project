@@ -2,6 +2,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'theme/app_theme.dart';
+import 'services/api_service.dart';
 import 'services/avatar_store.dart';
 import 'services/routine_store.dart';
 import 'services/workout_store.dart';
@@ -14,6 +15,7 @@ Future<void> main() async {
   await WorkoutStore.instance.load();
   await AvatarStore.instance.load();
   await RoutineStore.instance.load();
+  await ApiService.instance.load();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,

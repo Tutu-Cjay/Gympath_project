@@ -48,6 +48,9 @@ class WorkoutSession(Base):
     performance: Mapped[str] = mapped_column(String(4), default="-")
     bonus: Mapped[int] = mapped_column(Integer, default=0)
     duration_sec: Mapped[int] = mapped_column(Integer, default=0)
+    weight_kg: Mapped[float] = mapped_column(Float, default=0.0)
+    # The app's own id for the set, so syncing the same set twice stores it once.
+    client_id: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True)
     # client-supplied time the workout happened (app may sync offline sessions)
     client_timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

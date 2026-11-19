@@ -1,4 +1,6 @@
 """Aggregated stats + leaderboard."""
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -21,7 +23,10 @@ def my_stats(
 
 @router.get("/leaderboard", response_model=list[LeaderboardEntry])
 def leaderboard(
+    by: Literal["week_streak", "week", "reps"] = "week_streak",
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    return compute_leaderboard(db, current.id)
+    """Ranked by week streak (default), by training days this week, or by
+    total reps. The caller is always included, also when outside the top."""
+    return compute_leaderboard(db, current.id, by=by)

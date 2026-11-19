@@ -102,6 +102,55 @@ def main():
     assert lb[0]["is_me"] is True and lb[0]["rank"] == 1, lb
     print("leaderboard OK")
 
+    # week streak: 3+ training days a week, Monday to Sunday
+    from datetime import date, datetime, timedelta
+    from app.services import week_streak
+    mon = date(2026, 11, 16)
+    def days(*offsets):
+        return {mon + timedelta(days=o) for o in offsets}
+    # last week 3 days, the week before 3 days, this week 1 day so far
+    assert week_streak(days(-14, -12, -10, -7, -5, -3, 1), mon + timedelta(days=3)) == (2, 2, 1)
+    # this week reaches the goal: it counts already
+    assert week_streak(days(-7, -5, -3, 0, 1, 2), mon + timedelta(days=3)) == (2, 2, 3)
+    # a gap week breaks it; the best run is remembered
+    assert week_streak(days(-28, -27, -26, -21, -20, -19, -7, -6, -5), mon) == (1, 2, 0)
+    assert week_streak(set(), mon) == (0, 0, 0)
+    print("week streak OK")
+
+    # syncing the same sets again stores them once (client_id)
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    sync = {"sessions": [
+        {"workout_name": "Lat Pulldown", "reps": 10, "weight_kg": 40,
+         "client_id": f"set-{i}",
+         "client_timestamp": datetime.combine(monday - timedelta(days=7 - i), datetime.min.time()).isoformat()}
+        for i in range(3)
+    ]}
+    r = c.post("/sessions/bulk", headers=h, json=sync)
+    assert r.status_code == 201 and len(r.json()) == 3, r.text
+    r = c.post("/sessions/bulk", headers=h, json=sync)
+    assert r.status_code == 201 and len(r.json()) == 0, r.text
+    assert len(c.get("/sessions", headers=h).json()) == 6
+    s = c.get("/stats", headers=h).json()
+    assert s["week_streak"] == 1 and s["week_goal_days"] == 3, s
+    print("idempotent sync + week streak in stats OK")
+
+    # a second user with a longer streak ranks first by streak, me first by reps
+    r = c.post("/auth/register", json={
+        "email": "bat@test.com", "password": "secret123", "display_name": "Bat"})
+    h2 = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    c.post("/sessions/bulk", headers=h2, json={"sessions": [
+        {"workout_name": "Face Pull", "reps": 5,
+         "client_timestamp": datetime.combine(monday - timedelta(weeks=w) + timedelta(days=d), datetime.min.time()).isoformat()}
+        for w in (1, 2) for d in (0, 1, 2)]})
+    lb = c.get("/leaderboard", headers=h).json()
+    assert lb[0]["display_name"] == "Bat" and lb[0]["week_streak"] == 2, lb
+    assert lb[1]["is_me"] and lb[1]["rank"] == 2, lb
+    lb = c.get("/leaderboard?by=reps", headers=h).json()
+    assert lb[0]["is_me"], lb
+    assert c.get("/leaderboard?by=nope", headers=h).status_code == 422
+    print("leaderboard by week streak / reps OK")
+
     print("\nALL BACKEND TESTS PASSED")
 
 

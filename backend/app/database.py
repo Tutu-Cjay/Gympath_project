@@ -30,6 +30,28 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def upgrade_schema():
+    """Add columns that newer versions added to tables an older server
+    created (create_all only makes missing tables)."""
+    from sqlalchemy import inspect, text
+
+    added = {
+        "workout_sessions": {
+            "weight_kg": "FLOAT DEFAULT 0",
+            "client_id": "VARCHAR(80)",
+        },
+    }
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in added.items():
+            if not insp.has_table(table):
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in cols.items():
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def get_db():
     """FastAPI dependency — one DB session per request."""
     db = SessionLocal()
