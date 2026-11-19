@@ -1,0 +1,111 @@
+name: Tracker firmware
+
+# Builds firmware/Gympath_Track and publishes it for over-the-air updates:
+#   https://github.com/<owner>/<repo>/releases/download/firmware-latest/manifest.json
+# The app reads that manifest (FirmwareUpdateService), compares its version
+# with the tracker's (…cdefb) and installs the image over BLE.
+# Bump FW_VERSION in Gympath_Track.ino for every release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/3d-anatomy-prototype
+    paths:
+      - firmware/Gympath_Track/**
+      - firmware/tft_setup/**
+      - .github/workflows/firmware.yml
+
+permissions:
+  contents: write   # publishes the firmware release
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same toolchain as the README (and the Waveshare board docs).
+  ESP32_CORE: "2.0.12"
+  FQBN: esp32:esp32:esp32s3
+  LIBS: "NimBLE-Arduino@2.3.7 TFT_eSPI@2.5.43 QMI8658"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@$ESP32_CORE
+          for l in $LIBS; do arduino-cli lib install "$l"; done
+          arduino-cli lib list
+          cp firmware/tft_setup/User_Setup.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
+
+      - name: Show library APIs used by the sketch (diagnostics)
+        run: |
+          find ~/Arduino/libraries -iname 'QMI8658*.h' -exec sh -c 'echo "== $1"; grep -nE "bool|void|class|struct|define QMI8658_(ACCEL|GYRO)_(RANGE|ODR)" "$1" | head -60' _ {} \;
+          core=~/.arduino15/packages/esp32/hardware/esp32/$ESP32_CORE
+          grep -rn "verifyRollbackLater\|verifyOta" $core/cores/esp32/*.c* | head
+          grep -n "ROLLBACK" $core/tools/sdk/esp32s3/sdkconfig || true
+          grep -n "^esp32s3.menu.PartitionScheme.default\|^esp32s3.build.partitions\|^esp32s3.build.flash_size\|^esp32s3.upload.maximum_size" $core/boards.txt | head
+          cat $core/tools/partitions/default.csv
+
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn $FQBN --warnings default --output-dir build firmware/Gympath_Track
+          ls -l build
+
+      - name: Make manifest
+        id: meta
+        run: |
+          version=$(sed -nE 's/^#define[[:space:]]+FW_VERSION[[:space:]]+"([^"]+)".*/\1/p' firmware/Gympath_Track/Gympath_Track.ino)
+          test -n "$version"
+          name="gympath_track-$version.bin"
+          cp build/Gympath_Track.ino.bin "$name"
+          size=$(stat -c %s "$name")
+          # the image must fit the OTA app slot (default scheme: 0x140000)
+          test "$size" -lt 1310720
+          md5=$(md5sum "$name" | cut -d' ' -f1)
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/firmware-latest/$name"
+          notes=$(sed -n '/^ \* Release notes/,/^ \*\//p' firmware/Gympath_Track/Gympath_Track.ino | sed '1d;$d' | sed -E 's/^ \* ?//' | tr '\n' ' ' | sed 's/  */ /g;s/ $//')
+          jq -n --arg v "$version" --arg u "$url" --argjson s "$size" --arg m "$md5" --arg n "$notes" \
+            '{version:$v, url:$u, size:$s, md5:$m, notes:$n, minAppVersion:"1.0.0"}' > manifest.json
+          cat manifest.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gympath-firmware
+          path: |
+            ${{ steps.meta.outputs.name }}
+            manifest.json
+            build/Gympath_Track.ino.merged.bin
+          if-no-files-found: warn
+
+      # firmware-latest always holds the newest image + manifest; each version
+      # also stays downloadable under its own firmware-v<version> release.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          gh release delete firmware-latest --yes --cleanup-tag || true
+          gh release create firmware-latest "$NAME" manifest.json \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Tracker firmware $VERSION (latest)" \
+            --notes "$(jq -r .notes manifest.json)
+
+          Install from the app: Home → update icon (over Bluetooth). Built from ${GITHUB_SHA::7}."
+          if ! gh release view "firmware-v$VERSION" >/dev/null 2>&1; then
+            gh release create "firmware-v$VERSION" "$NAME" manifest.json \
+              --prerelease --target "$GITHUB_SHA" \
+              --title "Tracker firmware $VERSION" --notes "$(jq -r .notes manifest.json)"
+          fi
