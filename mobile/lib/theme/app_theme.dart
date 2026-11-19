@@ -13,6 +13,7 @@ class AppTheme {
   static ThemeData get darkTheme {
     return ThemeData(
       useMaterial3: false,
+      fontFamily: 'Roboto',
       brightness: Brightness.dark,
       scaffoldBackgroundColor: darkBg,
       primaryColor: neonGreen,
