@@ -3,7 +3,9 @@ import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
 import '../models/cable_exercise.dart';
 import '../models/training_stats.dart';
+import '../services/routine_store.dart';
 import '../services/workout_store.dart';
+import 'plan_screen.dart';
 import 'anatomy_studio_screen.dart';
 import 'cable_track_screen.dart';
 
@@ -77,6 +79,19 @@ class _ChooseWorkoutScreenState extends State<ChooseWorkoutScreen> {
       appBar: AppBar(
         automaticallyImplyLeading: widget.showBack,
         title: const Text('Choose Workout'),
+        actions: [
+          TextButton.icon(
+            onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => RoutineStore.instance.plan.value == null
+                        ? const PlanScreen()
+                        : const PlanDayScreen())),
+            icon: const Icon(Icons.event_note_rounded, size: 18),
+            label: const Text('Plans'),
+            style: TextButton.styleFrom(foregroundColor: AppTheme.neonGreen),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(

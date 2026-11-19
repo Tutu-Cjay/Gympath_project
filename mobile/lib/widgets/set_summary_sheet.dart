@@ -9,12 +9,19 @@ enum SetSummaryAction { nextSet, finish, export }
 
 /// Bottom sheet shown after Stop: the set's numbers, rep speeds, record
 /// badge, and what to do next.
-class SetSummarySheet extends StatelessWidget {
+class SetSummarySheet extends StatefulWidget {
   final WorkoutSession set;
   final bool saved;
   final bool simulated;
   final bool isRecord;
   final bool canExport;
+
+  /// Rest before the next set (s), shown on the button.
+  final int? restSec;
+
+  /// Called when the user says how many reps were left in reserve; null
+  /// hides the question (the set was not saved).
+  final ValueChanged<int?>? onRir;
 
   const SetSummarySheet({
     super.key,
@@ -23,6 +30,8 @@ class SetSummarySheet extends StatelessWidget {
     required this.simulated,
     required this.isRecord,
     required this.canExport,
+    this.restSec,
+    this.onRir,
   });
 
   static Future<SetSummaryAction?> show(
@@ -32,6 +41,8 @@ class SetSummarySheet extends StatelessWidget {
     required bool simulated,
     required bool isRecord,
     required bool canExport,
+    int? restSec,
+    ValueChanged<int?>? onRir,
   }) {
     return showModalBottomSheet<SetSummaryAction>(
       context: context,
@@ -45,8 +56,61 @@ class SetSummarySheet extends StatelessWidget {
         simulated: simulated,
         isRecord: isRecord,
         canExport: canExport,
+        restSec: restSec,
+        onRir: onRir,
       ),
     );
+  }
+
+  @override
+  State<SetSummarySheet> createState() => _SetSummarySheetState();
+}
+
+class _SetSummarySheetState extends State<SetSummarySheet> {
+  late int? _rir = widget.set.rir;
+
+  WorkoutSession get set => widget.set;
+  bool get saved => widget.saved;
+  bool get simulated => widget.simulated;
+  bool get isRecord => widget.isRecord;
+  bool get canExport => widget.canExport;
+
+  void _pickRir(int r) {
+    final v = _rir == r ? null : r;
+    setState(() => _rir = v);
+    widget.onRir?.call(v);
+  }
+
+  Widget _rirRow() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('HOW MANY MORE REPS COULD YOU HAVE DONE?',
+          style: TextStyle(
+              color: AppTheme.textSecondary,
+              fontSize: 10,
+              letterSpacing: 1.1,
+              fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      Row(children: [
+        for (var r = 0; r <= WorkoutSession.maxRir; r++)
+          Expanded(
+            child: Center(
+              child: ChoiceChip(
+                label: Text(r == WorkoutSession.maxRir ? '$r+' : '$r'),
+                selected: _rir == r,
+                onSelected: (_) => _pickRir(r),
+                showCheckmark: false,
+                selectedColor: AppTheme.neonGreen,
+                labelStyle: TextStyle(
+                    color: _rir == r ? Colors.black : AppTheme.textPrimary,
+                    fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+      ]),
+      const SizedBox(height: 4),
+      const Text('0 = could not do another. Used to tune the next weight.',
+          style: TextStyle(color: AppTheme.textMuted, fontSize: 11)),
+    ]);
   }
 
   @override
@@ -85,7 +149,7 @@ class SetSummarySheet extends StatelessWidget {
     }
 
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -167,6 +231,10 @@ class SetSummarySheet extends StatelessWidget {
                 style: TextStyle(color: RepBars.warn, fontSize: 12),
               ),
             ],
+            if (widget.onRir != null && set.reps > 0) ...[
+              const SizedBox(height: 18),
+              _rirRow(),
+            ],
             const SizedBox(height: 20),
             Row(children: [
               Expanded(
@@ -191,7 +259,9 @@ class SetSummarySheet extends StatelessWidget {
                     foregroundColor: Colors.black,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
-                  child: const Text('Rest, then next set'),
+                  child: Text(widget.restSec == null
+                      ? 'Rest, then next set'
+                      : 'Rest ${_rest(widget.restSec!)}, next set'),
                 ),
               ),
             ]),
@@ -213,3 +283,6 @@ class SetSummarySheet extends StatelessWidget {
 
 String _kg(double v) =>
     v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+
+String _rest(int sec) =>
+    sec >= 60 ? '${sec ~/ 60}:${(sec % 60).toString().padLeft(2, '0')}' : '${sec}s';

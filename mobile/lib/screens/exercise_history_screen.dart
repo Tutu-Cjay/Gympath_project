@@ -20,7 +20,8 @@ extension on _Metric {
 }
 
 /// One exercise over time: records, a chart of the chosen metric and every
-/// set, grouped by day. A set can be deleted with a long press.
+/// set, grouped by day. Swipe a set away (or long-press it) to delete it;
+/// Undo brings it back.
 class ExerciseHistoryScreen extends StatefulWidget {
   final String exercise;
   const ExerciseHistoryScreen({super.key, required this.exercise});
@@ -59,25 +60,18 @@ class _ExerciseHistoryScreenState extends State<ExerciseHistoryScreen> {
       };
 
   Future<void> _delete(WorkoutSession s) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.cardBg,
-        title: const Text('Delete this set?'),
-        content: Text(
-            '${s.workoutName}, set ${s.setIndex}: ${_line(s)}. This cannot be undone.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Delete',
-                  style: TextStyle(color: Color(0xFFFF6B6B)))),
-        ],
+    await WorkoutStore.instance.removeSession(s);
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+      behavior: SnackBarBehavior.floating,
+      content: Text('Deleted set ${s.setIndex}: ${_line(s)}'),
+      action: SnackBarAction(
+        label: 'Undo',
+        onPressed: () => WorkoutStore.instance.restoreSession(s),
       ),
-    );
-    if (ok == true) await WorkoutStore.instance.removeSession(s);
+    ));
   }
 
   @override
@@ -173,7 +167,23 @@ class _ExerciseHistoryScreenState extends State<ExerciseHistoryScreen> {
                           fontWeight: FontWeight.w700)),
                 ),
                 for (final s in byDay[day]!.reversed)
-                  _SetRow(set: s, onLongPress: () => _delete(s)),
+                  Dismissible(
+                    key: ObjectKey(s),
+                    direction: DismissDirection.endToStart,
+                    background: Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.only(right: 16),
+                      alignment: Alignment.centerRight,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF6B6B).withValues(alpha: .25),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.delete_outline_rounded,
+                          color: Color(0xFFFF6B6B)),
+                    ),
+                    onDismissed: (_) => _delete(s),
+                    child: _SetRow(set: s, onLongPress: () => _delete(s)),
+                  ),
               ],
             ],
           );
@@ -294,7 +304,11 @@ class _SetRow extends StatelessWidget {
           ),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_line(set),
+              Text(
+                  set.rir == null
+                      ? _line(set)
+                      : '${_line(set)}  ·  RIR ${set.rir}'
+                          '${set.rir == WorkoutSession.maxRir ? '+' : ''}',
                   style: const TextStyle(
                       color: AppTheme.textPrimary,
                       fontSize: 14,

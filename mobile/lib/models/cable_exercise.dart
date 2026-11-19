@@ -97,6 +97,10 @@ const Map<String, String> muscleGroupLabels = {
   'calves': 'Calves',
 };
 
+/// Whether an exercise pulls the load towards the body or pushes it away
+/// (for the pull : push balance on the progress screen).
+enum MovePattern { pull, push }
+
 class CableExercise {
   /// Workout name, as used in the workout list and saved sessions.
   final String name;
@@ -124,6 +128,11 @@ class CableExercise {
   /// True when the exercise is done sitting (the model sits on a bench).
   final bool seated;
 
+  final MovePattern pattern;
+
+  /// Multi-joint lift (heavier, fewer reps, longer rest) or isolation.
+  final bool compound;
+
   const CableExercise({
     required this.name,
     required this.animation,
@@ -135,6 +144,8 @@ class CableExercise {
     required this.cameraOrbit,
     required this.cameraTarget,
     this.seated = false,
+    required this.pattern,
+    this.compound = false,
   });
 
   /// 0..1 highlight strength of a muscle group at rep time [t].
@@ -150,6 +161,8 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Lat Pulldown',
     animation: 'LatPulldown',
+    pattern: MovePattern.pull,
+    compound: true,
     seated: true,
     primary: ['lats'],
     secondary: ['biceps', 'rhomboids', 'rear_delts', 'traps', 'forearms'],
@@ -169,6 +182,8 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Seated Cable Row',
     animation: 'SeatedCableRow',
+    pattern: MovePattern.pull,
+    compound: true,
     seated: true,
     primary: ['lats', 'rhomboids', 'traps'],
     secondary: ['rear_delts', 'biceps', 'erectors', 'forearms'],
@@ -187,6 +202,7 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Tricep Pushdown',
     animation: 'TricepPushdown',
+    pattern: MovePattern.push,
     primary: ['triceps'],
     secondary: ['forearms', 'abs'],
     setup: 'Clip the tracker on the weight stack. Stand close to a high '
@@ -204,6 +220,7 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Cable Bicep Curl',
     animation: 'CableBicepCurl',
+    pattern: MovePattern.pull,
     primary: ['biceps'],
     secondary: ['forearms', 'front_delts'],
     setup: 'Clip the tracker on the weight stack. Stand facing a low pulley, '
@@ -221,6 +238,7 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Cable Chest Fly',
     animation: 'CableChestFly',
+    pattern: MovePattern.push,
     primary: ['pecs'],
     secondary: ['front_delts', 'serratus', 'biceps', 'abs'],
     setup: 'Clip the tracker on one weight stack. Stand in the middle of the '
@@ -238,6 +256,7 @@ const List<CableExercise> cableExercises = [
   CableExercise(
     name: 'Face Pull',
     animation: 'FacePull',
+    pattern: MovePattern.pull,
     primary: ['rear_delts', 'traps', 'rhomboids'],
     secondary: ['rotator_cuff', 'biceps'],
     setup: 'Clip the tracker on the weight stack. Set the rope at face height '

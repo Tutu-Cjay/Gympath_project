@@ -8,6 +8,8 @@ import '../services/raw_export.dart';
 import '../services/workout_store.dart';
 import '../models/cable_exercise.dart';
 import '../models/motion_reconstructor.dart';
+import '../models/progression.dart';
+import '../models/routine.dart';
 import '../models/rep_analyzer.dart';
 import '../models/track_sample.dart';
 import '../models/workout_session.dart';
@@ -30,14 +32,18 @@ class CableTrackScreen extends StatefulWidget {
   /// The workout being performed; picks the exercise the figure shows.
   final String workoutName;
 
-  const CableTrackScreen({super.key, this.workoutName = 'Cable Workout'});
+  /// Sets, rep range and rest from the user's plan; without one the
+  /// exercise's default plan is used.
+  final PlannedExercise? plan;
+
+  const CableTrackScreen(
+      {super.key, this.workoutName = 'Cable Workout', this.plan});
 
   @override
   State<CableTrackScreen> createState() => _CableTrackScreenState();
 }
 
 class _CableTrackScreenState extends State<CableTrackScreen> {
-  static const int _defaultRestSec = 90;
   static const double _weightStep = 2.5;
   static const int _maxRawSamples = 60000; // 20 min at 50 Hz
 
@@ -48,6 +54,8 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
   final List<TrackSample> _raw = [];
   late final CableExercise _exercise;
   late final String _workoutId;
+  late final PlannedExercise _plan;
+  late final Suggestion _suggestion;
   StreamSubscription<TrackSample>? _sub;
 
   TrackSample? _last;
@@ -63,6 +71,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
 
   Timer? _restTimer;
   int _restLeft = 0; // seconds; 0 = not resting
+  bool _restOver = false; // rest just ended: show it until the next set
 
   @override
   void initState() {
@@ -70,8 +79,15 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     _exercise =
         cableExerciseByName(widget.workoutName) ?? cableExercises.first;
     _workoutId = DateTime.now().millisecondsSinceEpoch.toString();
-    final last = WorkoutStore.instance.training.lastWeight(widget.workoutName);
-    if (last > 0) _weightKg = last;
+    _plan = widget.plan ?? defaultPlanFor(widget.workoutName);
+    final training = WorkoutStore.instance.training;
+    _suggestion = suggestNext(training.setsOf(widget.workoutName), _plan);
+    final last = training.lastWeight(widget.workoutName);
+    if (_suggestion.weightKg > 0) {
+      _weightKg = _suggestion.weightKg;
+    } else if (last > 0) {
+      _weightKg = last;
+    }
     _sub = _ble.trackStream.listen(_onSample);
     _ble.connectionState.addListener(_onLinkChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -175,14 +191,23 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     });
     if (record) HapticFeedback.heavyImpact();
     final raw = List<TrackSample>.of(_raw);
+    var stored = set;
     while (mounted) {
       final action = await SetSummarySheet.show(
         context,
-        set: set,
+        set: stored,
         saved: save,
         simulated: simulated,
         isRecord: record,
         canExport: raw.isNotEmpty,
+        restSec: _plan.restSec,
+        onRir: save
+            ? (r) {
+                final old = stored;
+                stored = old.withRir(r);
+                store.replaceSession(old, stored);
+              }
+            : null,
       );
       if (!mounted) return;
       if (action == SetSummaryAction.export) {
@@ -192,7 +217,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
       if (action == SetSummaryAction.finish) {
         Navigator.pop(context);
       } else if (save) {
-        _startRest(_defaultRestSec); // next set (also when swiped away)
+        _startRest(_plan.restSec); // next set (also when swiped away)
       }
       return;
     }
@@ -214,7 +239,10 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
 
   void _startRest(int seconds) {
     _restTimer?.cancel();
-    setState(() => _restLeft = seconds);
+    setState(() {
+      _restLeft = seconds;
+      _restOver = false;
+    });
     _restTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!mounted) return t.cancel();
       setState(() => _restLeft--);
@@ -222,15 +250,41 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
       if (_restLeft <= 0) {
         t.cancel();
         HapticFeedback.heavyImpact();
-        _toast('Rest over. Ready for set $_setIndex');
+        setState(() => _restOver = true);
       }
     });
   }
 
   void _stopRest() {
     _restTimer?.cancel();
-    if (_restLeft != 0) setState(() => _restLeft = 0);
+    if (_restLeft != 0 || _restOver) {
+      setState(() {
+        _restLeft = 0;
+        _restOver = false;
+      });
+    }
   }
+
+  void _showWhy() => showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.cardBg,
+          title: Text(_suggestion.headline),
+          content: Text(_suggestion.reason),
+          actions: [
+            if (_suggestion.weightKg > 0 && _suggestion.weightKg != _weightKg && !_running)
+              TextButton(
+                onPressed: () {
+                  setState(() => _weightKg = _suggestion.weightKg);
+                  Navigator.pop(ctx);
+                },
+                child: Text('Use ${kg(_suggestion.weightKg)} kg'),
+              ),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          ],
+        ),
+      );
 
   Future<void> _zero() async {
     await _ble.sendCommand(TrackCommand.zero);
@@ -296,9 +350,11 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     final s = _last?.state;
     if (!_ble.isConnected) return 'No tracker connected';
     if (!_running) {
-      return _restLeft > 0
-          ? 'Resting before set $_setIndex'
-          : 'Clip the tracker on the weight stack, set the weight, press Start';
+      if (_restLeft > 0) return 'Resting before set $_setIndex';
+      if (_savedSets >= _plan.sets) {
+        return 'All ${_plan.sets} planned sets done. Finish, or do an extra set';
+      }
+      return 'Clip the tracker on the weight stack, set the weight, press Start';
     }
     switch (s) {
       case TrackState.calibrating:
@@ -391,6 +447,10 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
                     ),
                     SizedBox(height: Responsive.h(context, 10)),
                     _buildSetBar(),
+                    if (!_running) ...[
+                      SizedBox(height: Responsive.h(context, 8)),
+                      _buildGuideLine(),
+                    ],
                     if (connected && _ble.simulation.value) ...[
                       SizedBox(height: Responsive.h(context, 8)),
                       _buildSimulationSave(),
@@ -421,7 +481,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
                       SizedBox(height: Responsive.h(context, 8)),
                       RepBars(reps: reps, height: Responsive.h(context, 48)),
                     ],
-                    if (_restLeft > 0) ...[
+                    if (_restLeft > 0 || _restOver) ...[
                       SizedBox(height: Responsive.h(context, 10)),
                       _buildRest(),
                     ],
@@ -458,7 +518,7 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
         border: Border.all(color: AppTheme.cardBgLight),
       ),
       child: Row(children: [
-        Text('SET $_setIndex',
+        Text('SET $_setIndex/${_plan.sets}',
             style: const TextStyle(
                 color: AppTheme.neonGreen,
                 fontSize: 13,
@@ -523,7 +583,79 @@ class _CableTrackScreenState extends State<CableTrackScreen> {
     );
   }
 
+  /// Target, what was done last time at this set, and the suggested weight.
+  Widget _buildGuideLine() {
+    final lastSets = _suggestion.lastSets;
+    final lastText = lastSets.isEmpty
+        ? 'No earlier sets'
+        : 'Last: ${lastSets.map((s) => '${kg(s.weightKg)}×${s.reps}').join(' · ')}';
+    final up = _suggestion.kind == ProgressionKind.increase;
+    return Row(children: [
+      Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Target ${_plan.target} reps',
+              style: const TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+          Text(lastText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+        ]),
+      ),
+      const SizedBox(width: 8),
+      InkWell(
+        onTap: _showWhy,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: (up ? AppTheme.neonGreen : Colors.white).withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+                color: up ? AppTheme.neonGreen : AppTheme.cardBgLight),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(up ? Icons.trending_up_rounded : Icons.info_outline_rounded,
+                size: 15, color: up ? AppTheme.neonGreen : AppTheme.textSecondary),
+            const SizedBox(width: 5),
+            Text(_suggestion.headline,
+                style: TextStyle(
+                    color: up ? AppTheme.neonGreen : AppTheme.textPrimary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+          ]),
+        ),
+      ),
+    ]);
+  }
+
   Widget _buildRest() {
+    if (_restOver) {
+      return GestureDetector(
+        onTap: _stopRest,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: AppTheme.neonGreen,
+            borderRadius: BorderRadius.circular(Responsive.r(context, 12)),
+          ),
+          child: Row(children: [
+            const Icon(Icons.notifications_active_rounded, color: Colors.black, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Rest over · go for set $_setIndex',
+                  style: const TextStyle(
+                      color: Colors.black,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800)),
+            ),
+            const Icon(Icons.close_rounded, color: Colors.black54, size: 18),
+          ]),
+        ),
+      );
+    }
     final m = _restLeft ~/ 60, sec = _restLeft % 60;
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),

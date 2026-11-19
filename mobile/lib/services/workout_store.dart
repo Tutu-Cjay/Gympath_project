@@ -114,6 +114,18 @@ class WorkoutStore {
     await _persist();
   }
 
+  /// Put a set back, e.g. after an undo.
+  Future<void> restoreSession(WorkoutSession session) => addSession(session);
+
+  /// Replace a saved set with an edited copy (e.g. with RIR added).
+  Future<void> replaceSession(WorkoutSession old, WorkoutSession updated) async {
+    final i = _sessions.indexOf(old);
+    if (i < 0) return;
+    _sessions[i] = updated;
+    _recompute();
+    await _persist();
+  }
+
   /// Read-only analysis of everything saved.
   TrainingStats get training => TrainingStats(_sessions);
 

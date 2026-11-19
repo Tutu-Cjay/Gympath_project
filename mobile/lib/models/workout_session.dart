@@ -61,6 +61,12 @@ class WorkoutSession {
   /// Recorded with the built-in simulation, not the real tracker.
   final bool simulated;
 
+  /// Reps in reserve: how many more reps the user says they could have done
+  /// (0 = to failure, 4 = 4 or more). Null when not given.
+  final int? rir;
+
+  static const int maxRir = 4;
+
   const WorkoutSession({
     required this.workoutName,
     required this.reps,
@@ -71,7 +77,22 @@ class WorkoutSession {
     required this.durationSec,
     required this.timestamp,
     this.simulated = false,
+    this.rir,
   });
+
+  /// The same set with [rir] set (null clears it).
+  WorkoutSession withRir(int? rir) => WorkoutSession(
+        workoutName: workoutName,
+        reps: reps,
+        weightKg: weightKg,
+        repDetails: repDetails,
+        workoutId: workoutId,
+        setIndex: setIndex,
+        durationSec: durationSec,
+        timestamp: timestamp,
+        simulated: simulated,
+        rir: rir?.clamp(0, maxRir),
+      );
 
   /// Score shown on the dashboard: one point per rep.
   int get points => reps;
@@ -120,6 +141,7 @@ class WorkoutSession {
         'durationSec': durationSec,
         'timestamp': timestamp.toIso8601String(),
         if (simulated) 'simulated': true,
+        if (rir != null) 'rir': rir,
       };
 
   /// Also reads records saved by older app versions (no weight / reps detail).
@@ -142,6 +164,7 @@ class WorkoutSession {
       durationSec: (j['durationSec'] ?? 0) as int,
       timestamp: timestamp,
       simulated: j['simulated'] == true,
+      rir: j['rir'] is int ? (j['rir'] as int).clamp(0, maxRir) : null,
     );
   }
 }

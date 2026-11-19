@@ -3,7 +3,9 @@ import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/ble_status_chip.dart';
+import '../services/routine_store.dart';
 import '../services/workout_store.dart';
+import 'plan_screen.dart';
 import 'choose_workout_screen.dart';
 import 'firmware_update_screen.dart';
 import 'anatomy_studio_screen.dart';
@@ -251,6 +253,8 @@ class _HomeTab extends StatelessWidget {
                         ),
                       ),
                       SizedBox(height: Responsive.h(context, 20)),
+                      const _PlanCard(),
+                      SizedBox(height: Responsive.h(context, 12)),
                       // Add Workout button
                       SizedBox(
                         width: double.infinity,
@@ -326,6 +330,88 @@ class _HomeTab extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+/// The plan's next day, or an invitation to pick a plan.
+class _PlanCard extends StatelessWidget {
+  const _PlanCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ActivePlan?>(
+      valueListenable: RoutineStore.instance.plan,
+      builder: (context, plan, _) {
+        final String title, line;
+        final IconData icon;
+        if (plan == null) {
+          title = 'Follow a plan';
+          line = 'Ready-made cable plans with sets, rep targets and the next '
+              'weight to use.';
+          icon = Icons.event_note_rounded;
+        } else {
+          final multi = plan.routine.days.length > 1;
+          final day = plan.day;
+          final name = multi ? '${plan.routine.name} · ${day.name}' : plan.routine.name;
+          if (plan.doneOn(DateTime.now())) {
+            title = 'Done for today';
+            line = 'Rest and recover. Next session: $name, '
+                '${day.exercises.length} exercises.';
+            icon = Icons.bedtime_rounded;
+          } else {
+            title = 'Next: $name';
+            line = '${day.exercises.length} exercises · ${day.totalSets} sets · '
+                '${day.exercises.map((e) => e.exercise).take(3).join(', ')}'
+                '${day.exercises.length > 3 ? '…' : ''}';
+            icon = Icons.play_circle_fill_rounded;
+          }
+        }
+        return InkWell(
+          borderRadius: BorderRadius.circular(Responsive.r(context, 16)),
+          onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) =>
+                      plan == null ? const PlanScreen() : const PlanDayScreen())),
+          child: Container(
+            padding: EdgeInsets.all(Responsive.w(context, 16)),
+            decoration: BoxDecoration(
+              color: AppTheme.cardBg,
+              borderRadius: BorderRadius.circular(Responsive.r(context, 16)),
+              border: Border.all(
+                  color: plan == null
+                      ? AppTheme.cardBgLight
+                      : AppTheme.neonGreen.withValues(alpha: .6)),
+            ),
+            child: Row(children: [
+              Icon(icon, color: AppTheme.neonGreen, size: Responsive.r(context, 34)),
+              SizedBox(width: Responsive.w(context, 14)),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  if (plan != null)
+                    const Text('YOUR PLAN',
+                        style: TextStyle(
+                            color: AppTheme.textMuted,
+                            fontSize: 10,
+                            letterSpacing: 1.1,
+                            fontWeight: FontWeight.w800)),
+                  Text(title,
+                      style: const TextStyle(
+                          color: AppTheme.textPrimary,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text(line,
+                      style: const TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 12)),
+                ]),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: AppTheme.textMuted),
+            ]),
+          ),
+        );
+      },
     );
   }
 }

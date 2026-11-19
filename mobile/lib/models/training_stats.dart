@@ -7,7 +7,7 @@ DateTime dayOf(DateTime t) => DateTime(t.year, t.month, t.day);
 
 /// Monday 00:00 of the week [t] is in.
 DateTime weekStart(DateTime t) =>
-    dayOf(t).subtract(Duration(days: t.weekday - DateTime.monday));
+    DateTime(t.year, t.month, t.day - (t.weekday - DateTime.monday));
 
 /// Best values of one exercise on one day: a point on the progress charts.
 class DayBest {
@@ -58,6 +58,38 @@ class PeriodSummary {
     required this.reps,
     required this.volumeKg,
   });
+}
+
+/// How recovered one muscle group is.
+class MuscleRecovery {
+  /// 0 = fully recovered .. 1 = just trained hard.
+  final double fatigue;
+
+  /// When the group is ready again; null when it is ready now.
+  final Duration? readyIn;
+
+  /// Last set that worked it (as prime mover or assisting); null if never.
+  final DateTime? lastTrained;
+
+  const MuscleRecovery({required this.fatigue, this.readyIn, this.lastTrained});
+
+  static const double readyBelow = 0.2;
+
+  bool get recovering => fatigue >= readyBelow;
+
+  /// Not worked in the last week.
+  bool untrained(DateTime now) =>
+      lastTrained == null || now.difference(lastTrained!).inDays >= 7;
+}
+
+/// Pulling vs pushing sets over a span.
+class Balance {
+  final int pullSets;
+  final int pushSets;
+  const Balance(this.pullSets, this.pushSets);
+
+  /// pull : push, or null without push sets.
+  double? get ratio => pushSets == 0 ? null : pullSets / pushSets;
 }
 
 /// Reading of the saved sets for the progress screens. Pure: no storage, no
@@ -164,6 +196,83 @@ class TrainingStats {
     }
     return out;
   }
+
+  /// A set's work fades over [recoveryHours]. A muscle counts as recovering
+  /// while what is left adds up to more than [MuscleRecovery.readyBelow] of
+  /// [fatigueSets] hard sets (prime mover 1, assisting 0.5).
+  static const double recoveryHours = 48;
+  static const double fatigueSets = 6;
+
+  Map<String, MuscleRecovery> recovery(DateTime now) {
+    final left = <String, double>{};
+    final last = <String, DateTime>{};
+    final parts = <String, List<(double, double)>>{}; // (share, hours ago)
+    for (final s in sets) {
+      if (s.timestamp.isAfter(now)) continue;
+      final e = cableExerciseByName(s.workoutName);
+      if (e == null) continue;
+      final ago = now.difference(s.timestamp).inMinutes / 60;
+      for (final (groups, share) in [(e.primary, 1.0), (e.secondary, 0.5)]) {
+        for (final g in groups) {
+          last[g] = s.timestamp;
+          if (ago >= recoveryHours) continue;
+          left[g] = (left[g] ?? 0) + share * (1 - ago / recoveryHours);
+          parts.putIfAbsent(g, () => []).add((share, ago));
+        }
+      }
+    }
+    final out = <String, MuscleRecovery>{};
+    for (final g in muscleGroupLabels.keys) {
+      final f = ((left[g] ?? 0) / fatigueSets).clamp(0.0, 1.0);
+      Duration? readyIn;
+      if (f >= MuscleRecovery.readyBelow) {
+        // Step forward in hours until what is left falls under the line.
+        for (var h = 1; h <= recoveryHours; h++) {
+          final rest = parts[g]!.fold(
+              0.0,
+              (a, p) =>
+                  a + p.$1 * math.max(0, 1 - (p.$2 + h) / recoveryHours));
+          if (rest / fatigueSets < MuscleRecovery.readyBelow) {
+            readyIn = Duration(hours: h);
+            break;
+          }
+        }
+      }
+      out[g] = MuscleRecovery(fatigue: f, readyIn: readyIn, lastTrained: last[g]);
+    }
+    return out;
+  }
+
+  /// Sets per calendar day from [from] until [to].
+  Map<DateTime, int> dailySets(DateTime from, DateTime to) {
+    final out = <DateTime, int>{};
+    for (final s in sets) {
+      if (s.timestamp.isBefore(from) || !s.timestamp.isBefore(to)) continue;
+      final d = dayOf(s.timestamp);
+      out[d] = (out[d] ?? 0) + 1;
+    }
+    return out;
+  }
+
+  Balance balance(DateTime from, DateTime to) {
+    var pull = 0, push = 0;
+    for (final s in sets) {
+      if (s.timestamp.isBefore(from) || !s.timestamp.isBefore(to)) continue;
+      final e = cableExerciseByName(s.workoutName);
+      if (e == null) continue;
+      if (e.pattern == MovePattern.pull) {
+        pull++;
+      } else {
+        push++;
+      }
+    }
+    return Balance(pull, push);
+  }
+
+  /// Sets done today of [exercise].
+  int setsToday(String exercise, DateTime now) => sets
+      .where((s) => s.workoutName == exercise && dayOf(s.timestamp) == dayOf(now))
+      .length;
 
   /// Weight to suggest for the next set of [exercise]: the last one used.
   double lastWeight(String exercise) {
