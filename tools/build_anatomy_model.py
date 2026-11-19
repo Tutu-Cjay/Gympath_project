@@ -648,6 +648,35 @@ for p in parts:
         if "male_verts" in p:
             p["male_verts"] = p["male_verts"][used]
 parts = [p for p in parts if len(p["faces"]) >= 4]
+
+# Fitness view: only the muscles people train and recognise are drawn (the
+# groups above), without the deep ones that lie under them. Small and deep
+# muscles only add clutter showing through the skin.
+DEEP = r"multifidus|internal oblique|gluteus minimus|digitorum profundus|pronator quadratus|" \
+       r"supinator|flexor pollicis longus|coracobrachialis|subscapularis"
+_before = len(parts)
+parts = [p for p in parts if group_of(p) != "other_muscle" and not re.search(DEEP, p["name"])]
+print("fitness muscles:", len(parts), "of", _before)
+
+
+def taubin(v, f, rounds=6, lam=0.5, mu=-0.53):
+    """Smooth a mesh without shrinking it (removes the faceting left by
+    decimation, keeps the muscle's shape)."""
+    from scipy.sparse import coo_matrix
+    n = len(v)
+    i = np.concatenate([f[:, 0], f[:, 1], f[:, 2], f[:, 1], f[:, 2], f[:, 0]])
+    j = np.concatenate([f[:, 1], f[:, 2], f[:, 0], f[:, 0], f[:, 1], f[:, 2]])
+    adj = coo_matrix((np.ones(len(i)), (i, j)), shape=(n, n)).tocsr()
+    adj.data[:] = 1.0
+    deg = np.maximum(np.asarray(adj.sum(axis=1)).ravel(), 1)[:, None]
+    for _ in range(rounds):
+        for k in (lam, mu):
+            v = v + k * (adj @ v / deg - v)
+    return v
+
+
+for p in parts:
+    p["verts"] = taubin(p["verts"], p["faces"])
 for p in parts:
     p["normals"] = vertex_normals(p["verts"], p["faces"])
     p["fade"] = neck_fade(p["verts"][:, 2])
