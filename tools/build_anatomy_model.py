@@ -539,8 +539,13 @@ if QBODY:
     for p in under_parts:
         p["verts"] = to_quaternius(p["verts"])
     extra = {k: to_quaternius(np.asarray(J[k])[None])[0] for k in J if k.startswith(("scap", "heel"))}
-    J = dict(JQ, **extra)
-    mid_hip, L4, T11, T6, C7, C1, head_top = (SQ[k] for k in ("mid_hip", "L4", "T11", "T6", "C7", "C1", "head_top"))
+    # The muscles were fitted in the posed figure (arms down like the
+    # anatomy's); the rig and the exported skin use Quaternius' T-pose, the
+    # pose its skin weights are made for, so a raised arm blends into the
+    # body as it should.
+    JB, SB = QCHAR.rig_joints(bind=True)
+    J = dict(JB, **extra)
+    mid_hip, L4, T11, T6, C7, C1, head_top = (SB[k] for k in ("mid_hip", "L4", "T11", "T6", "C7", "C1", "head_top"))
 if not QBODY:
     import mh_body  # noqa: E402
     pair = mh_body.posed_pair(MPFB_DATA, J)
@@ -980,7 +985,7 @@ if QBODY:
     from mathutils.bvhtree import BVHTree
     qb = QCHAR.body
     qv, qf = qb["verts"], qb["faces"]
-    attrs = np.concatenate([qb["uv"], QCHAR.rig_weights(qb, BONE_NAMES)], axis=1)
+    attrs = np.concatenate([qb["uv"], QCHAR.rig_weights(qb, BONE_NAMES), qb["bind"]], axis=1)
     qv, attrs, qf = real_head.subdivide(qv, attrs, qf)
     NB = len(BONE_NAMES)
     groups = [g for g, _ in GROUPS if any(group_of(p) == g for p in parts)]
@@ -1069,7 +1074,7 @@ if QBODY:
         global qv, attrs
         out = []
         for gi, g in enumerate(groups):
-            share = attrs[:, 2 + NB:]
+            share = attrs[:, 2 + NB + 3:]
             other = np.delete(share, gi, axis=1).max(axis=1)
             field = np.minimum(share[:, gi] - 0.5, share[:, gi] - other - LINE)
             near = (field[rest] > -0.3).any(axis=1)
@@ -1091,8 +1096,8 @@ if QBODY:
     remap[used] = np.arange(len(used))
     w = attrs[used, 2:2 + NB]
     w = w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9)
-    sv_, sf_ = qv[used], remap[faces_all]
-    BODY_MORPHS.append((offset, body_morphs(sv_, sf_, w, attrs[used, 2 + NB:], groups)))
+    sv_, sf_ = attrs[used, 2 + NB:2 + NB + 3], remap[faces_all]      # T-pose positions
+    BODY_MORPHS.append((offset, body_morphs(sv_, sf_, w, attrs[used, 2 + NB + 3:], groups)))
     add_piece(mats_all, sv_, sf_, w, attrs[used, :2])
     skin_range = (offset - len(used), offset)
 
@@ -1101,7 +1106,7 @@ if QBODY:
     ew = QCHAR.rig_weights(eye, BONE_NAMES)
     uvm = np.stack([eye["uv"][:, 0] % 1.0, eye["uv"][:, 1]], axis=1)
     rad = np.linalg.norm(uvm - np.array([0.494, 0.499]), axis=1)
-    ev, ea, f_iris, f_sclera = real_head.split(eye["verts"], eye["faces"], 0.112 - rad,
+    ev, ea, f_iris, f_sclera = real_head.split(eye["bind"], eye["faces"], 0.112 - rad,
                                                np.concatenate([ew, eye["uv"]], axis=1))
     uvm = np.stack([ea[:, -2] % 1.0, ea[:, -1]], axis=1)
     rad = np.linalg.norm(uvm - np.array([0.494, 0.499]), axis=1)
@@ -1114,7 +1119,7 @@ if QBODY:
     # Brows and hair styles (Quaternius'), moving with the head.
     for app_id, meshes in QCHAR.hair.items():
         for m in meshes:
-            add_piece("brows" if app_id == "brows" else app_id, m["verts"], m["faces"],
+            add_piece("brows" if app_id == "brows" else app_id, m["bind"], m["faces"],
                       QCHAR.rig_weights(m, BONE_NAMES), m["uv"])
 else:
     # The skin follows whatever lies right under it: each skin vertex takes the

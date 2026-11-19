@@ -89,6 +89,11 @@ class Character:
         for n in self.names:
             if self.parent[n] not in self.names:
                 visit(n)
+        # The bind pose (T-pose) is kept: the exported figure is skinned in
+        # it, which is what Quaternius' skin weights are made for.
+        for m in self.all_meshes():
+            m["bind"] = m["verts"].copy()
+        self.bind_joint = dict(self.joint)
 
     def all_meshes(self):
         out = [self.body, self.eyes]
@@ -146,10 +151,11 @@ class Character:
             np.add.at(w, (np.arange(len(w)), col[m["joints"][:, k]]), m["weights"][:, k])
         return w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9)
 
-    def rig_joints(self):
+    def rig_joints(self, bind=False):
         """Joint positions under the anatomy model's J names, plus the spine
-        landmarks (mid_hip, L4, T11, T6, C7, C1, head_top)."""
-        j = self.joint
+        landmarks (mid_hip, L4, T11, T6, C7, C1, head_top); of the posed
+        figure, or with bind=True of the T-pose it is skinned in."""
+        j = self.bind_joint if bind else self.joint
         J = {}
         for s in "lr":
             J[f"sternal_{s}"] = j[f"clavicle_{s}"]
