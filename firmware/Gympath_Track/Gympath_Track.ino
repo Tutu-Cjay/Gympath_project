@@ -24,6 +24,10 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.1.1: calibration no longer reports MOVED on a still tracker: it judges
+ * stillness by how much the readings vary, so the gyro's zero offset is
+ * measured instead of treated as movement; when it does fail, the screen
+ * shows what the sensor measured.
  * 1.1.0: reps that pause at either end are no longer lost; motion is
  * integrated with the real time between IMU samples; the first START after
  * reconnecting is never ignored; a stalled update is cancelled after 15 s
@@ -38,10 +42,10 @@
 #include <esp_ota_ops.h>
 #include <math.h>
 
-#define FW_VERSION   "1.1.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.1.1"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-2"
+#define FW_BUILD     "TRACK-1D-3"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -122,10 +126,16 @@ volatile uint32_t otaErrorMs = 0;        // when the last update failed
 const uint32_t    OTA_STALL_MS = 15000;  // no data this long → cancel
 
 /* ================= TUNING ================= */
-const uint32_t CALIB_WINDOW_MS  = 600;    // still window used for gravity
+const uint32_t CALIB_WINDOW_MS  = 500;    // still window used for gravity
 const uint32_t CALIB_TIMEOUT_MS = 6000;   // give up if never still
-const float    CALIB_ACC_STD    = 0.10f;  // m/s²  max |a| std-dev while "still"
-const float    CALIB_GYRO_MAX   = 0.06f;  // rad/s max mean |ω| while "still"
+// "Still" is judged by how much the readings vary, not by their mean: the
+// gyro's zero-rate offset (a few °/s on the QMI8658) is what calibration
+// measures, so it must not count as movement.
+const float    CALIB_ACC_STD    = 0.25f;  // m/s²  max std-dev of |a|
+const float    CALIB_GYRO_STD   = 0.05f;  // rad/s max std-dev of ω (≈ 3 °/s)
+const float    CALIB_GYRO_MAX   = 0.35f;  // rad/s max mean |ω| (≈ 20 °/s): turning
+const float    CALIB_G_MIN      = 7.0f;   // m/s²  |a| must look like gravity
+const float    CALIB_G_MAX      = 12.5f;
 
 const float    ZUPT_ACC_TH      = 0.15f;  // m/s²  | |a| − |g| | below this …
 const float    ZUPT_GYRO_TH     = 0.08f;  // rad/s … and |ω| below this …
@@ -148,7 +158,10 @@ volatile float   vNow = 0;     // read by the display task
 // calibration accumulators
 uint32_t calStartMs = 0, calWinStartMs = 0;
 uint32_t calN = 0;
-double   cSum[3], cMagSum, cMagSq, cGyro[3], cGyroMag;
+double   cSum[3], cMagSum, cMagSq, cGyro[3], cGyroSq[3], cGyroMag;
+// the stillest window seen, shown on the screen when calibration fails
+float calBestAccMean = 0, calBestAccStd = 99, calBestGyroDps = 0, calBestGyroStdDps = 0;
+void calibReset(uint32_t now);
 
 // tracking
 float up[3]    = {0, 0, 1};   // gravity-opposite unit vector, body frame
@@ -199,7 +212,9 @@ void resetMotion() {
 
 void beginCalibration(uint32_t now) {
   state = ST_CALIB;
-  calStartMs = calWinStartMs = now;
+  calStartMs = now;
+  calibReset(now);
+  calBestAccStd = 99;
   calN = 0;
   for (int i = 0; i < 3; i++) { cSum[i] = 0; cGyro[i] = 0; }
   cMagSum = cMagSq = cGyroMag = 0;
@@ -274,10 +289,18 @@ void sendHexLine(char tag, const void* data, size_t n) {
 }
 
 /* ================= CALIBRATION ================= */
+void calibReset(uint32_t now) {
+  calWinStartMs = now; calN = 0;
+  for (int i = 0; i < 3; i++) { cSum[i] = 0; cGyro[i] = 0; cGyroSq[i] = 0; }
+  cMagSum = cMagSq = cGyroMag = 0;
+}
+
 void calibStep(const float a[3], const float w[3], uint32_t now) {
   float mag = sqrtf(dot3(a, a));
   float wm  = sqrtf(dot3(w, w));
-  for (int i = 0; i < 3; i++) { cSum[i] += a[i]; cGyro[i] += w[i]; }
+  for (int i = 0; i < 3; i++) {
+    cSum[i] += a[i]; cGyro[i] += w[i]; cGyroSq[i] += (double)w[i] * w[i];
+  }
   cMagSum += mag; cMagSq += (double)mag * mag; cGyroMag += wm;
   calN++;
 
@@ -286,12 +309,30 @@ void calibStep(const float a[3], const float w[3], uint32_t now) {
   double mean = cMagSum / calN;
   double var  = cMagSq / calN - mean * mean;
   double std  = var > 0 ? sqrt(var) : 0;
-  double gAvg = cGyroMag / calN;
+  double gVar = 0, gMean[3];
+  for (int i = 0; i < 3; i++) {
+    gMean[i] = cGyro[i] / calN;
+    double vi = cGyroSq[i] / calN - gMean[i] * gMean[i];
+    if (vi > 0) gVar += vi;
+  }
+  double gStd  = sqrt(gVar);
+  double gBiasMag = sqrt(gMean[0]*gMean[0] + gMean[1]*gMean[1] + gMean[2]*gMean[2]);
 
-  if (std < CALIB_ACC_STD && gAvg < CALIB_GYRO_MAX && calN > 50) {
+  if (std < calBestAccStd) {
+    calBestAccMean = mean; calBestAccStd = std;
+    calBestGyroDps = gBiasMag * RAD_TO_DEG; calBestGyroStdDps = gStd * RAD_TO_DEG;
+  }
+#if DEBUG_STREAM
+  Serial.printf("calib n=%lu |a|=%.3f sd=%.3f gyro=%.2fdps sd=%.2fdps\n",
+                (unsigned long)calN, mean, std, gBiasMag * RAD_TO_DEG, gStd * RAD_TO_DEG);
+#endif
+
+  bool still = calN > 50 && std < CALIB_ACC_STD && gStd < CALIB_GYRO_STD &&
+               gBiasMag < CALIB_GYRO_MAX && mean > CALIB_G_MIN && mean < CALIB_G_MAX;
+  if (still) {
     for (int i = 0; i < 3; i++) {
       up[i]    = (float)(cSum[i] / calN);   // accel at rest points "up"
-      gBias[i] = (float)(cGyro[i] / calN);
+      gBias[i] = (float)gMean[i];
     }
     gMag = sqrtf(dot3(up, up));
     norm3(up);
@@ -300,10 +341,7 @@ void calibStep(const float a[3], const float w[3], uint32_t now) {
   } else if (now - calStartMs > CALIB_TIMEOUT_MS) {
     state = ST_CALIB_FAIL;               // app shows "keep still, retry"
   } else {
-    // not still enough — start a fresh window
-    calWinStartMs = now; calN = 0;
-    for (int i = 0; i < 3; i++) { cSum[i] = 0; cGyro[i] = 0; }
-    cMagSum = cMagSq = cGyroMag = 0;
+    calibReset(now);                     // not still enough — fresh window
   }
 }
 
@@ -481,8 +519,19 @@ void displayTask(void*) {
                             tft.drawString("press Start", 120, 145, 2); break;
         case ST_CALIB:      tft.drawString("HOLD", 120, 112, 4);
                             tft.drawString("still...", 120, 145, 2); break;
-        case ST_CALIB_FAIL: tft.drawString("MOVED", 120, 112, 4);
-                            tft.drawString("retry Start", 120, 145, 2); break;
+        case ST_CALIB_FAIL: {
+          tft.drawString("MOVED", 120, 100, 4);
+          tft.drawString("retry Start", 120, 130, 2);
+          // what the sensor saw in its stillest moment (for support)
+          char l1[24], l2[24];
+          snprintf(l1, sizeof l1, "a %.2f sd %.2f", calBestAccMean, calBestAccStd);
+          snprintf(l2, sizeof l2, "g %.1f sd %.1f dps", calBestGyroDps, calBestGyroStdDps);
+          tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+          tft.drawString(l1, 120, 160, 2);
+          tft.drawString(l2, 120, 178, 2);
+          tft.setTextColor(TFT_WHITE, TFT_BLACK);
+          break;
+        }
         default:            draw7SegNumber(r, 120, 120, 6, color); break;
       }
       if (tm) {
