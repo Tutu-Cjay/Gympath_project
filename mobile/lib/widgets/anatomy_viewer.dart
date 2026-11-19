@@ -42,8 +42,8 @@ class AnatomyViewerController {
   void seek(double t) => _run('seek($t)');
 
   void setOrbit(String orbit) => _run('orbit(${jsonEncode(orbit)})');
-  void setCamera(String orbit, String target) =>
-      _run('camera(${jsonEncode(orbit)}, ${jsonEncode(target)})');
+  void setCamera(String orbit, String target, [String? fieldOfView]) => _run(
+      'camera(${jsonEncode(orbit)}, ${jsonEncode(target)}, ${jsonEncode(fieldOfView)})');
   void resetCamera() {
     final e = _exercise;
     if (e != null) _run('camera(${jsonEncode(e.cameraOrbit)}, ${jsonEncode(e.cameraTarget)})');
@@ -222,6 +222,26 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     return [0, 1, 2].map(function (i) { return a[i] + (b[i] - a[i]) * t; });
   }
   function restingRegion() { return skinOn ? avatar.skin : BARE; }
+  // Body shape: the model's morph targets, set from the avatar's sliders
+  // (model-viewer has no API for them, so through its three.js scene).
+  function applyBody() {
+    try {
+      const sym = Object.getOwnPropertySymbols(mv).find(function (s) {
+        return s.description === 'scene';
+      });
+      const scene = sym ? mv[sym] : null;
+      if (!scene || !scene.traverse) return;
+      const body = avatar.body || {};
+      scene.traverse(function (o) {
+        const dict = o.morphTargetDictionary;
+        if (!dict || !o.morphTargetInfluences) return;
+        for (const name in dict) {
+          o.morphTargetInfluences[dict[name]] = body[name] || 0;
+        }
+      });
+      if (scene.queueRender) scene.queueRender();
+    } catch (e) { /* keep the default build */ }
+  }
   let skinOn = true, dressDirty = true, BASE = null;
   let focus = null, last = {}, lastSent = 0, paused = false, heat = null;
   // Live mode: the figure eases towards the progress the tracker reports.
@@ -326,6 +346,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     last = {};
     dressDirty = true;
     original = null;
+    applyBody();
     if (heat) machine(false);
     mv.animationName = cfg.animation;
     resume();
@@ -344,11 +365,14 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     speed: function (s) { mv.timeScale = s; },
     seek: function (f) { mv.currentTime = f * (mv.duration || 4); },
     orbit: function (o) { mv.cameraOrbit = o; },
-    camera: function (o, t) { mv.cameraOrbit = o; mv.cameraTarget = t; },
+    camera: function (o, t, f) {
+      mv.cameraOrbit = o; mv.cameraTarget = t;
+      if (f) mv.fieldOfView = f;
+    },
     focus: function (g) { focus = g; last = {}; },
     heat: function (h) { heat = h; last = {}; machine(!h); },
     skin: function (on) { skinOn = on; dressDirty = true; },
-    avatar: function (a) { avatar = a; dressDirty = true; },
+    avatar: function (a) { avatar = a; dressDirty = true; applyBody(); },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
   };

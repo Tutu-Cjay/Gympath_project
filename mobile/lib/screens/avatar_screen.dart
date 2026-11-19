@@ -28,12 +28,23 @@ class _AvatarScreenState extends State<AvatarScreen> {
     'front': '0deg 87deg 3.2m',
     'side': '65deg 87deg 3.2m',
     'back': '180deg 87deg 3.2m',
+    'body': '20deg 84deg 4.4m',
   };
 
   Avatar get _avatar => _draft.value;
 
-  String get _target =>
-      _avatar.sex == AvatarSex.male ? '0m 1.69m 0m' : '0m 1.64m 0m';
+  String get _target => _view == 'body'
+      ? '0m 0.95m 0m'
+      : _avatar.sex == AvatarSex.male
+          ? '0m 1.69m 0m'
+          : '0m 1.64m 0m';
+
+  String get _fov => _view == 'body' ? '27deg' : '8deg';
+
+  void _look(String view) {
+    setState(() => _view = view);
+    _viewer.setCamera(_orbits[view]!, _target, _fov);
+  }
 
   @override
   void initState() {
@@ -61,7 +72,7 @@ class _AvatarScreenState extends State<AvatarScreen> {
     if (ready) {
       _viewer.pause();
       _viewer.seek(0);
-      _viewer.setCamera(_orbits[_view]!, _target);
+      _viewer.setCamera(_orbits[_view]!, _target, _fov);
       _viewer.setAvatar(_avatar);
     }
   }
@@ -136,6 +147,7 @@ class _AvatarScreenState extends State<AvatarScreen> {
                         (id) => _set(a.copyWith(hair: id))),
                   _swatches('Hair colour', Avatar.hairColors, a.hairColor,
                       (i) => _set(a.copyWith(hairColor: i))),
+                  for (final b in Avatar.bodySliders) _slider(a, b),
                 ],
               ),
             ),
@@ -196,10 +208,7 @@ class _AvatarScreenState extends State<AvatarScreen> {
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: GestureDetector(
-                    onTap: () {
-                      setState(() => _view = v);
-                      _viewer.setCamera(_orbits[v]!, _target);
-                    },
+                    onTap: () => _look(v),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 7),
@@ -273,6 +282,40 @@ class _AvatarScreenState extends State<AvatarScreen> {
               orElse: () => options.first),
           (o) => o.name,
           (o) => onTap(o.id));
+
+  Widget _slider(Avatar a, BodySlider b) {
+    final v = a.bodyValue(b.id);
+    return _section(
+      b.name,
+      Column(children: [
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: AppTheme.neonGreen,
+            inactiveTrackColor: AppTheme.cardBgLight,
+            thumbColor: AppTheme.neonGreen,
+            overlayColor: AppTheme.neonGreen.withValues(alpha: .15),
+            trackHeight: 3,
+          ),
+          child: Slider(
+            value: v,
+            min: b.min,
+            max: b.max,
+            onChangeStart: (_) {
+              if (_view != 'body') _look('body');
+            },
+            onChanged: (x) => _set(a.withBody(b.id, x)),
+          ),
+        ),
+        Row(children: [
+          Text(b.lowLabel,
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+          const Spacer(),
+          Text(b.highLabel,
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+        ]),
+      ]),
+    );
+  }
 
   Widget _swatches(String label, List<AvatarSwatch> options, int selected,
       ValueChanged<int> onTap) {

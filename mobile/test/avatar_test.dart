@@ -49,4 +49,20 @@ void main() {
       expect(o.id == 'none' || o.id.startsWith('hair_'), isTrue);
     }
   });
+
+  test('body shape sliders', () {
+    final a = const Avatar().withBody('Muscle', 0.7).withBody('Waist', -2);
+    expect(a.bodyValue('Muscle'), 0.7);
+    expect(a.bodyValue('Waist'), -1); // clamped to the slider
+    expect(a.bodyValue('Chest'), 0);
+    final back = Avatar.fromJson(a.toJson());
+    expect(back, a);
+    expect((a.toJs()['body']! as Map)['Muscle'], 0.7);
+    expect(a.withBody('Muscle', 0).withBody('Waist', 0), const Avatar());
+    // Junk and out-of-range values from storage.
+    final j = Avatar.fromJson({'body': {'Muscle': 9, 'Chest': 'big', 'Height': 1}});
+    expect(j.bodyValue('Muscle'), 1);
+    expect(j.body.containsKey('Chest'), isFalse);
+    expect(j.body.containsKey('Height'), isFalse);
+  });
 }

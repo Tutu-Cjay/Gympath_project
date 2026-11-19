@@ -17,8 +17,21 @@ class AvatarOption {
 
 enum AvatarSex { male, female }
 
+/// A body-shape slider: [id] is a morph target in the 3D models.
+class BodySlider {
+  final String name;
+  final String id;
+  final double min;
+  final double max;
+  final String lowLabel;
+  final String highLabel;
+  const BodySlider(this.name, this.id, this.min, this.max, this.lowLabel, this.highLabel);
+
+  double clamp(double v) => v.clamp(min, max).toDouble();
+}
+
 /// The user's avatar: a character of their sex (the working muscles light up
-/// on its skin) with their own skin tone, eye colour and hair.
+/// on its skin) with their own skin tone, eye colour, hair and body shape.
 ///
 /// Kept on the phone for now (AvatarStore). [toJson] is the format to sync
 /// to a server later; ids are material names in the 3D models, so they stay
@@ -29,6 +42,8 @@ class Avatar {
   final int eyeColor; // index into [eyeColors]
   final String hair; // id from [hairStylesFor(sex)]
   final int hairColor; // index into [hairColors]
+  /// Body shape: [BodySlider.id] -> value (missing = 0, the model's build).
+  final Map<String, double> body;
 
   const Avatar({
     this.sex = AvatarSex.male,
@@ -36,6 +51,7 @@ class Avatar {
     this.eyeColor = 0,
     this.hair = 'hair_short',
     this.hairColor = 0,
+    this.body = const {},
   });
 
   static const Avatar standard = Avatar();
@@ -86,12 +102,36 @@ class Avatar {
     AvatarSwatch('Auburn', Color(0xFF7A3B22)),
   ];
 
+  /// Body-shape sliders, in the order the editor shows them.
+  static const List<BodySlider> bodySliders = [
+    BodySlider('Muscle', 'Muscle', -0.5, 1, 'Lean', 'Muscular'),
+    BodySlider('Body fat', 'BodyFat', 0, 1, 'Low', 'High'),
+    BodySlider('Shoulders', 'Shoulders', -1, 1, 'Narrow', 'Broad'),
+    BodySlider('Waist', 'Waist', -1, 1, 'Slim', 'Wide'),
+    BodySlider('Chest', 'Chest', -1, 1, 'Small', 'Full'),
+  ];
+
+  double bodyValue(String id) => body[id] ?? 0;
+
+  Avatar withBody(String id, double value) {
+    final s = bodySliders.firstWhere((b) => b.id == id);
+    final next = Map<String, double>.of(body);
+    final v = (s.clamp(value) * 100).round() / 100;
+    if (v == 0) {
+      next.remove(id);
+    } else {
+      next[id] = v;
+    }
+    return copyWith(body: next);
+  }
+
   Avatar copyWith({
     AvatarSex? sex,
     int? skinTone,
     int? eyeColor,
     String? hair,
     int? hairColor,
+    Map<String, double>? body,
   }) =>
       Avatar(
         sex: sex ?? this.sex,
@@ -99,6 +139,7 @@ class Avatar {
         eyeColor: eyeColor ?? this.eyeColor,
         hair: hair ?? this.hair,
         hairColor: hairColor ?? this.hairColor,
+        body: body ?? this.body,
       );
 
   /// Switch body, keeping the colours and picking that sex's default hair if
@@ -125,7 +166,11 @@ class Avatar {
         'eyeColor': linear(eyeColors[eyeColor].color),
         'hair': hair,
         'hairColor': linear(hairColors[hairColor].color),
+        'body': {for (final b in bodySliders) b.id: bodyValue(b.id)},
       };
+
+  static bool _sameBody(Map<String, double> a, Map<String, double> b) =>
+      bodySliders.every((s) => (a[s.id] ?? 0) == (b[s.id] ?? 0));
 
   @override
   bool operator ==(Object other) =>
@@ -134,10 +179,12 @@ class Avatar {
       other.skinTone == skinTone &&
       other.eyeColor == eyeColor &&
       other.hair == hair &&
-      other.hairColor == hairColor;
+      other.hairColor == hairColor &&
+      _sameBody(other.body, body);
 
   @override
-  int get hashCode => Object.hash(sex, skinTone, eyeColor, hair, hairColor);
+  int get hashCode => Object.hash(sex, skinTone, eyeColor, hair, hairColor,
+      Object.hashAll(bodySliders.map((s) => body[s.id] ?? 0)));
 
   Map<String, dynamic> toJson() => {
         'version': 2,
@@ -146,6 +193,7 @@ class Avatar {
         'eyeColor': eyeColor,
         'hair': hair,
         'hairColor': hairColor,
+        'body': body,
       };
 
   /// Unknown or out-of-range values fall back to the defaults. Version 1
@@ -165,12 +213,21 @@ class Avatar {
     } else if (h is int && sex == AvatarSex.male && h >= 0 && h < maleHair.length) {
       hair = maleHair[h].id;
     }
+    final body = <String, double>{};
+    final b = j['body'];
+    if (b is Map) {
+      for (final s in bodySliders) {
+        final v = b[s.id];
+        if (v is num && v != 0) body[s.id] = s.clamp(v.toDouble());
+      }
+    }
     return Avatar(
       sex: sex,
       skinTone: index('skinTone', skinTones.length, base.skinTone),
       eyeColor: index('eyeColor', eyeColors.length, base.eyeColor),
       hair: hair,
       hairColor: index('hairColor', hairColors.length, base.hairColor),
+      body: body,
     );
   }
 }

@@ -877,6 +877,73 @@ def smooth_field(field, faces, n_verts, rounds):
     return field
 
 
+# Body shape morphs the user sets in the app (glTF morph targets on the
+# skin, in the rest pose). Each is a smooth push of the skin: small enough
+# that the skin stays on its bones.
+BODY_MORPHS = []          # (first vertex, {morph: deltas})
+MORPH_NAMES = ["Muscle", "BodyFat", "Shoulders", "Waist", "Chest"]
+
+
+def body_morphs(v, f, w, share, groups):
+    n = vertex_normals(v, f)
+    bi = {b: BONE_NAMES.index(b) for b in BONE_NAMES}
+
+    def wsum(*names):
+        return sum(w[:, bi[b]] for b in names)
+
+    def bump(z, centre, width):
+        return np.exp(-((z - centre) / width) ** 2)
+
+    def smoothed(x, rounds=6):
+        return smooth_field(x, f, len(v), rounds)
+    z, x = v[:, 2], v[:, 0]
+    hip_z = (J["hip_l"][2] + J["hip_r"][2]) / 2
+    waist_z = L4[2] + 0.06
+    torso = wsum("pelvis", "spine_01", "spine_02", "spine_03")
+    front, back = np.clip(-n[:, 1], 0, 1), np.clip(n[:, 1], 0, 1)
+    gshare = {g: share[:, k] for k, g in enumerate(groups)}
+
+    def g(*names):
+        return sum(gshare.get(k, 0) for k in names)
+    out = {}
+    # Muscle: every trained group swells, limbs and chest most.
+    m = (g("pecs", "front_delts", "side_delts", "rear_delts", "biceps", "triceps", "traps", "lats",
+           "quads", "hamstrings", "calves", "glutes", "forearms") + 0.5 * g("abs", "obliques", "serratus",
+                                                                           "rhomboids", "erectors"))
+    out["Muscle"] = n * (0.020 * smoothed(np.clip(m, 0, 1)))[:, None]
+    # Body fat, where it gathers on a man or on a woman.
+    if SEX == "female":
+        amt = (0.020 * bump(z, waist_z - 0.03, 0.10) * front * torso
+               + 0.018 * bump(z, waist_z, 0.08) * np.abs(n[:, 0]) * torso
+               + 0.020 * bump(z, hip_z, 0.12) * wsum("pelvis", "thigh_l", "thigh_r") * (0.5 + back)
+               + 0.015 * bump(z, hip_z - 0.16, 0.14) * wsum("thigh_l", "thigh_r")
+               + 0.012 * wsum("upperarm_l", "upperarm_r") * (0.4 + back)
+               + 0.016 * bump(z, T6[2], 0.08) * front * torso)
+    else:
+        amt = (0.038 * bump(z, waist_z - 0.02, 0.11) * front * torso
+               + 0.024 * bump(z, waist_z, 0.08) * np.abs(n[:, 0]) * torso
+               + 0.014 * bump(z, hip_z, 0.12) * wsum("pelvis", "thigh_l", "thigh_r")
+               + 0.012 * bump(z, hip_z - 0.16, 0.14) * wsum("thigh_l", "thigh_r")
+               + 0.008 * wsum("upperarm_l", "upperarm_r")
+               + 0.012 * bump(z, T6[2], 0.08) * front * torso)
+    out["BodyFat"] = n * (1.9 * smoothed(amt))[:, None]
+    # Shoulders: rounder deltoids and traps, a little wider.
+    sh = smoothed(np.clip(g("front_delts", "side_delts", "rear_delts", "traps"), 0, 1))
+    near = np.maximum(np.exp(-(np.linalg.norm(v - J["shoulder_l"], axis=1) / 0.12) ** 2),
+                      np.exp(-(np.linalg.norm(v - J["shoulder_r"], axis=1) / 0.12) ** 2))
+    out["Shoulders"] = n * (0.020 * sh)[:, None] + np.stack([np.sign(x) * 0.022 * near,
+                                                            np.zeros_like(x), np.zeros_like(x)], 1)
+    # Waist: in or out around the body's axis (the app goes both ways).
+    cy = np.median(v[torso > 0.8, 1]) if (torso > 0.8).any() else 0.0
+    radial = np.stack([x, v[:, 1] - cy, np.zeros_like(x)], 1)
+    radial /= np.maximum(np.linalg.norm(radial, axis=1, keepdims=True), 1e-6)
+    out["Waist"] = radial * (0.05 * smoothed(bump(z, waist_z, 0.09) * torso))[:, None]
+    # Chest: pectorals, or the bust.
+    ch = g("pecs") + (bump(z, T6[2] - 0.03, 0.07) * front * torso * 0.6 if SEX == "female" else 0)
+    out["Chest"] = n * ((0.040 if SEX == "female" else 0.026) * smoothed(np.clip(ch, 0, 1)))[:, None]
+    return out
+
+
 def add_piece(mat, v, f, w, uv=None):
     global offset
     all_verts.append(v)
@@ -1002,8 +1069,10 @@ if QBODY:
     remap = -np.ones(len(qv), int)
     remap[used] = np.arange(len(used))
     w = attrs[used, 2:2 + NB]
-    add_piece(mats_all, qv[used], remap[faces_all], w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9),
-              attrs[used, :2])
+    w = w / np.maximum(w.sum(axis=1, keepdims=True), 1e-9)
+    sv_, sf_ = qv[used], remap[faces_all]
+    BODY_MORPHS.append((offset, body_morphs(sv_, sf_, w, attrs[used, 2 + NB:], groups)))
+    add_piece(mats_all, sv_, sf_, w, attrs[used, :2])
     skin_range = (offset - len(used), offset)
 
     # Eyes: iris and pupil cut as circles in the eye texture's UV space.
@@ -1443,6 +1512,15 @@ for name in material_names:
     mesh.materials.append(m)
 
 body = bpy.data.objects.new("Anatomy", mesh)
+if QBODY and BODY_MORPHS:
+    body.shape_key_add(name="Basis", from_mix=False)
+    for name in MORPH_NAMES:
+        delta = np.zeros_like(V)
+        for start, d in BODY_MORPHS:
+            delta[start:start + len(d[name])] = d[name]
+        sk = body.shape_key_add(name=name, from_mix=False)
+        sk.data.foreach_set("co", (V + delta).astype(np.float32).ravel())
+        sk.value = 0.0
 scene.collection.objects.link(body)
 
 arm_data = bpy.data.armatures.new("Rig")
@@ -1676,7 +1754,7 @@ bpy.ops.export_scene.gltf(
     export_animations=True,
     export_animation_mode="NLA_TRACKS",
     export_skins=True,
-    export_morph=False,
+    export_morph=QBODY,
     export_morph_normal=False,
     export_morph_tangent=False,
     export_cameras=False,
