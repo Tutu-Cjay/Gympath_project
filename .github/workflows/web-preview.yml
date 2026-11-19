@@ -1,7 +1,8 @@
 name: Web preview build
 
-# Builds the app for the browser and keeps it as a build artifact
-# (gympath-web). Nothing is published from here.
+# Builds the app for the browser. The build is kept as a build artifact
+# (gympath-web) and also committed to the web-build branch (generated files
+# only), so it can be fetched with git and hosted as a private preview.
 
 on:
   workflow_dispatch:
@@ -10,7 +11,7 @@ on:
       - feature/3d-anatomy-prototype
 
 permissions:
-  contents: read
+  contents: write   # updates the web-build branch
 
 concurrency:
   group: web-preview-${{ github.ref }}
@@ -47,3 +48,13 @@ jobs:
           name: gympath-web
           path: mobile/build/web
           retention-days: 14
+
+      - name: Store the build on the web-build branch
+        run: |
+          cd mobile/build/web
+          git init -q -b web-build
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Web build of ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" web-build
