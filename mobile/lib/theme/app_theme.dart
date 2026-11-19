@@ -37,6 +37,17 @@ class AppTheme {
           fontWeight: FontWeight.w600,
         ),
       ),
+      // Choice chips (plan days, map modes, leaderboard sorting): the chosen
+      // one in green.
+      chipTheme: const ChipThemeData(
+        backgroundColor: cardBgLight,
+        selectedColor: neonGreen,
+        secondarySelectedColor: neonGreen,
+        labelStyle: TextStyle(color: textPrimary, fontSize: 13),
+        secondaryLabelStyle: TextStyle(
+            color: Colors.black, fontSize: 13, fontWeight: FontWeight.w700),
+        showCheckmark: false,
+      ),
       cardTheme: CardThemeData(
         color: cardBg,
         elevation: 0,

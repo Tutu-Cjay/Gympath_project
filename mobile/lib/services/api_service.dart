@@ -226,14 +226,33 @@ class ApiService {
       throw const ApiException('Signed out by the server. Please sign in again.');
     }
     if (r.statusCode >= 400) {
-      final detail = data is Map ? data['detail'] : null;
-      throw ApiException(detail is String
-          ? detail
-          : r.statusCode == 422
-              ? 'Check the fields (password needs 6+ characters)'
-              : 'Server error ${r.statusCode}');
+      throw ApiException(errorMessage(r.statusCode, data));
     }
     return data;
+  }
+
+  /// A readable message from an error response (FastAPI: "detail" is a
+  /// string, or a list of field errors for 422).
+  static String errorMessage(int status, Object? data) {
+    final detail = data is Map ? data['detail'] : null;
+    if (detail is String) return detail;
+    if (detail is List && detail.isNotEmpty && detail.first is Map) {
+      final e = detail.first as Map;
+      final loc = e['loc'];
+      final field = loc is List && loc.isNotEmpty ? '${loc.last}' : '';
+      var msg = '${e['msg'] ?? ''}';
+      if (field == 'password' && msg.contains('at least')) {
+        msg = 'needs 6 or more characters';
+      }
+      final name = switch (field) {
+        'email' => 'Email',
+        'password' => 'Password',
+        'display_name' => 'Name',
+        _ => field,
+      };
+      return name.isEmpty ? msg : '$name: $msg';
+    }
+    return 'Server error $status';
   }
 
   Future<void> _save(ApiAccount? a) async {

@@ -169,7 +169,7 @@ class _MyStreak extends StatelessWidget {
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(
-                  '${streak.current} week${streak.current == 1 ? '' : 's'} streak',
+                  '${streak.current}-week streak',
                   style: const TextStyle(
                       color: AppTheme.textPrimary,
                       fontSize: 24,

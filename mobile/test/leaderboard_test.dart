@@ -89,6 +89,23 @@ void main() {
       expect(old.weekStreak, 0);
       expect(old.weekGoalDays, 3);
       expect(LeaderboardSort.weekStreak.param, 'week_streak');
+      expect(ApiService.errorMessage(409, {'detail': 'Email already registered'}),
+          'Email already registered');
+      expect(
+          ApiService.errorMessage(422, {
+            'detail': [
+              {'loc': ['body', 'email'], 'msg': 'value is not a valid email address'}
+            ]
+          }),
+          'Email: value is not a valid email address');
+      expect(
+          ApiService.errorMessage(422, {
+            'detail': [
+              {'loc': ['body', 'password'], 'msg': 'String should have at least 6 characters'}
+            ]
+          }),
+          'Password: needs 6 or more characters');
+      expect(ApiService.errorMessage(500, null), 'Server error 500');
     });
   });
 }

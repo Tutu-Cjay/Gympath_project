@@ -328,7 +328,7 @@ class _WeekStreakCard extends StatelessWidget {
             SizedBox(width: Responsive.w(context, 14)),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${w.current} week${w.current == 1 ? '' : 's'} streak',
+                Text('${w.current}-week streak',
                     style: const TextStyle(
                         color: AppTheme.textPrimary,
                         fontSize: 22,
