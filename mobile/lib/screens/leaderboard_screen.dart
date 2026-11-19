@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/cable_exercise.dart';
 import '../models/training_stats.dart';
 import '../services/api_service.dart';
 import '../services/workout_store.dart';
@@ -19,6 +20,7 @@ class LeaderboardScreen extends StatefulWidget {
 class _LeaderboardScreenState extends State<LeaderboardScreen> {
   final _api = ApiService.instance;
   LeaderboardSort _sort = LeaderboardSort.weekStreak;
+  bool _thisWeek = false; // volume and reps: this week instead of all time
   Future<List<LeaderboardEntry>>? _rows;
 
   @override
@@ -32,7 +34,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
     setState(() {
       _rows = () async {
         await _api.sync(WorkoutStore.instance.sessions);
-        return _api.leaderboard(_sort);
+        return _api.leaderboard(_sort, thisWeek: _thisWeek);
       }();
     });
   }
@@ -89,15 +91,30 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                 valueListenable: WorkoutStore.instance.stats,
                 builder: (context, s, _) => _MyStreak(streak: s.weekStreak),
               ),
+              const SizedBox(height: 10),
+              ValueListenableBuilder<WorkoutStats>(
+                valueListenable: WorkoutStore.instance.stats,
+                builder: (context, _, __) =>
+                    _MyWeek(training: WorkoutStore.instance.training),
+              ),
               const SizedBox(height: 18),
               if (account == null)
                 _JoinCard(onJoin: _signIn)
               else ...[
-                Wrap(spacing: 8, children: [
+                const Text('RANK BY',
+                    style: TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 10,
+                        letterSpacing: 1.2,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
+                Wrap(spacing: 8, runSpacing: 6, children: [
                   for (final (sort, label) in [
                     (LeaderboardSort.weekStreak, 'Week streak'),
-                    (LeaderboardSort.week, 'This week'),
-                    (LeaderboardSort.reps, 'Total reps'),
+                    (LeaderboardSort.week, 'Days this week'),
+                    (LeaderboardSort.muscles, 'Muscles worked'),
+                    (LeaderboardSort.volume, 'Weight lifted'),
+                    (LeaderboardSort.reps, 'Reps'),
                   ])
                     ChoiceChip(
                       label: Text(label),
@@ -108,6 +125,23 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                       },
                     ),
                 ]),
+                if (_sort.hasPeriod) ...[
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    for (final (week, label) in [(true, 'This week'), (false, 'All time')])
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          label: Text(label),
+                          selected: _thisWeek == week,
+                          onSelected: (_) {
+                            _thisWeek = week;
+                            _load();
+                          },
+                        ),
+                      ),
+                  ]),
+                ],
                 const SizedBox(height: 12),
                 FutureBuilder<List<LeaderboardEntry>>(
                   future: _rows,
@@ -126,12 +160,11 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                     }
                     final rows = snap.data ?? const [];
                     return Column(children: [
-                      for (final r in rows) _Row(entry: r, sort: _sort),
+                      for (final r in rows)
+                        _Row(entry: r, sort: _sort, thisWeek: _thisWeek),
                       const SizedBox(height: 8),
                       Text(
-                          'A week counts when you train on at least '
-                          '${WorkoutStore.weekGoalDays} days (Monday to Sunday). '
-                          'Simulated sets are not sent.',
+                          '${_note(_sort)} Simulated sets are not sent.',
                           style: const TextStyle(
                               color: AppTheme.textMuted, fontSize: 11)),
                     ]);
@@ -142,6 +175,74 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+String _note(LeaderboardSort sort) => switch (sort) {
+      LeaderboardSort.weekStreak || LeaderboardSort.week =>
+        'A week counts when you train on at least ${WorkoutStore.weekGoalDays} '
+            'days (Monday to Sunday).',
+      LeaderboardSort.muscles =>
+        'Share of the ${trainableMuscleGroups.length} muscle groups the cable '
+            'exercises train that got work this week: one set as the main '
+            'muscle, or two as a helper.',
+      LeaderboardSort.volume =>
+        'Weight lifted = weight on the stack × reps, added up over every set.',
+      LeaderboardSort.reps => 'Every counted rep.',
+    };
+
+String formatKg(double kg) => kg >= 10000
+    ? '${(kg / 1000).toStringAsFixed(1)} t'
+    : kg >= 1000
+        ? '${(kg / 1000).toStringAsFixed(2)} t'
+        : '${kg.round()} kg';
+
+/// This week from the phone's own sets: muscle share, weight lifted, reps.
+class _MyWeek extends StatelessWidget {
+  final TrainingStats training;
+  const _MyWeek({required this.training});
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final from = weekStart(now);
+    final to = DateTime(from.year, from.month, from.day + 7);
+    final t = training;
+    final (active, total) = t.muscleCoverage(from, to);
+    final week = t.summary(from, to);
+    Widget cell(String value, String label) => Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(value,
+                style: const TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800)),
+            Text(label,
+                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+          ]),
+        );
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.cardBgLight),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('YOUR WEEK',
+            style: TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 10,
+                letterSpacing: 1.2,
+                fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        Row(children: [
+          cell('${total == 0 ? 0 : (100 * active / total).round()}%', 'muscles ($active/$total)'),
+          cell(formatKg(week.volumeKg), 'weight lifted'),
+          cell('${week.reps}', 'reps'),
+        ]),
+      ]),
     );
   }
 }
@@ -239,7 +340,8 @@ class WeekDots extends StatelessWidget {
 class _Row extends StatelessWidget {
   final LeaderboardEntry entry;
   final LeaderboardSort sort;
-  const _Row({required this.entry, required this.sort});
+  final bool thisWeek;
+  const _Row({required this.entry, required this.sort, required this.thisWeek});
 
   @override
   Widget build(BuildContext context) {
@@ -247,7 +349,9 @@ class _Row extends StatelessWidget {
     final (value, unit) = switch (sort) {
       LeaderboardSort.weekStreak => ('${e.weekStreak}', e.weekStreak == 1 ? 'week' : 'weeks'),
       LeaderboardSort.week => ('${e.daysThisWeek}', e.daysThisWeek == 1 ? 'day' : 'days'),
-      LeaderboardSort.reps => ('${e.totalReps}', 'reps'),
+      LeaderboardSort.muscles => ('${e.musclesPct}%', '${e.musclesActive}/${e.musclesTotal}'),
+      LeaderboardSort.volume => (formatKg(thisWeek ? e.weekVolumeKg : e.totalVolumeKg), ''),
+      LeaderboardSort.reps => ('${thisWeek ? e.weekReps : e.totalReps}', 'reps'),
     };
     const medals = [Color(0xFFFFD54F), Color(0xFFCFD8DC), Color(0xFFD7A26B)];
     return Container(

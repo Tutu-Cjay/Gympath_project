@@ -297,6 +297,14 @@ class TrainingStats {
     return out;
   }
 
+  /// Muscle groups worked from [from] until [to] (one set as prime mover or
+  /// two assisting), of [trainableMuscleGroups]. Same rule as the server.
+  (int active, int total) muscleCoverage(DateTime from, DateTime to) {
+    final m = muscleSets(from, to);
+    final active = trainableMuscleGroups.where((g) => (m[g] ?? 0) >= 1).length;
+    return (active, trainableMuscleGroups.length);
+  }
+
   /// Sets per calendar day from [from] until [to].
   Map<DateTime, int> dailySets(DateTime from, DateTime to) {
     final out = <DateTime, int>{};

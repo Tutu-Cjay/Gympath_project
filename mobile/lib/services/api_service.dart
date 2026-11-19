@@ -43,6 +43,14 @@ class LeaderboardEntry {
   final int daysThisWeek;
   final int weekGoalDays;
   final int totalReps;
+  final int weekReps;
+  final double totalVolumeKg;
+  final double weekVolumeKg;
+
+  /// Muscle groups worked this week, of those the exercises can train.
+  final int musclesActive;
+  final int musclesTotal;
+  final int musclesPct;
 
   const LeaderboardEntry({
     required this.rank,
@@ -53,10 +61,17 @@ class LeaderboardEntry {
     required this.daysThisWeek,
     required this.weekGoalDays,
     required this.totalReps,
+    this.weekReps = 0,
+    this.totalVolumeKg = 0,
+    this.weekVolumeKg = 0,
+    this.musclesActive = 0,
+    this.musclesTotal = 0,
+    this.musclesPct = 0,
   });
 
   factory LeaderboardEntry.fromJson(Map<String, dynamic> j) {
     int n(String k) => (j[k] as num?)?.toInt() ?? 0;
+    double d(String k) => (j[k] as num?)?.toDouble() ?? 0;
     return LeaderboardEntry(
       rank: n('rank'),
       name: (j['display_name'] ?? '') as String,
@@ -66,19 +81,31 @@ class LeaderboardEntry {
       daysThisWeek: n('days_this_week'),
       weekGoalDays: j['week_goal_days'] is num ? n('week_goal_days') : 3,
       totalReps: n('total_reps'),
+      weekReps: n('week_reps'),
+      totalVolumeKg: d('total_volume_kg'),
+      weekVolumeKg: d('week_volume_kg'),
+      musclesActive: n('muscles_active'),
+      musclesTotal: n('muscles_total'),
+      musclesPct: n('muscles_pct'),
     );
   }
 }
 
 /// How the leaderboard is ranked (the server's `by`).
-enum LeaderboardSort { weekStreak, week, reps }
+enum LeaderboardSort { weekStreak, week, muscles, volume, reps }
 
 extension LeaderboardSortApi on LeaderboardSort {
   String get param => switch (this) {
         LeaderboardSort.weekStreak => 'week_streak',
         LeaderboardSort.week => 'week',
+        LeaderboardSort.muscles => 'muscles',
+        LeaderboardSort.volume => 'volume',
         LeaderboardSort.reps => 'reps',
       };
+
+  /// Volume and reps can be ranked over this week or all time.
+  bool get hasPeriod =>
+      this == LeaderboardSort.volume || this == LeaderboardSort.reps;
 }
 
 class ApiException implements Exception {
@@ -175,9 +202,11 @@ class ApiService {
     }
   }
 
-  Future<List<LeaderboardEntry>> leaderboard(LeaderboardSort by) async {
+  Future<List<LeaderboardEntry>> leaderboard(LeaderboardSort by,
+      {bool thisWeek = false}) async {
     final a = _need();
-    final body = await _send('GET', a.server, '/leaderboard?by=${by.param}',
+    final body = await _send('GET', a.server,
+        '/leaderboard?by=${by.param}&period=${thisWeek ? 'week' : 'all'}',
         token: a.token);
     return (body as List)
         .whereType<Map<String, dynamic>>()

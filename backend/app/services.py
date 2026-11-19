@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import DAILY_REP_GOAL, WEEK_GOAL_DAYS
+from .exercises import muscle_coverage
 from .models import User, WorkoutSession
 from .schemas import LeaderboardEntry, StatsOut
 
@@ -97,35 +98,47 @@ def compute_stats(db: Session, user_id: int) -> StatsOut:
 
 
 def compute_leaderboard(db: Session, me_id: int, limit: int = 20,
-                        by: str = "week_streak") -> list[LeaderboardEntry]:
-    """Users ranked [by] week streak (then days this week, then reps), by
-    training days this week, or by total reps. The top [limit], plus the
-    caller with their real rank when they are further down."""
+                        by: str = "week_streak", period: str = "all") -> list[LeaderboardEntry]:
+    """Users ranked [by]:
+    - week_streak: weeks in a row (then days this week, then reps)
+    - week: training days this week
+    - muscles: share of muscle groups worked this week
+    - volume / reps: weight moved or reps, this week or all time ([period])
+    The top [limit], plus the caller with their real rank when further down."""
     today = date.today()
+    monday = week_start(today)
     rows = []
     for u in db.scalars(select(User)).all():
-        days = {_day(s.client_timestamp) for s in u.sessions}
+        sessions = u.sessions
+        days = {_day(s.client_timestamp) for s in sessions}
         weeks, best, this_week = week_streak(days, today)
+        week = [s for s in sessions if monday <= _day(s.client_timestamp) <= today]
+        active, total = muscle_coverage(s.workout_name for s in week)
         rows.append(dict(
             user=u, week_streak=weeks, best_week_streak=best, days_this_week=this_week,
-            points=sum(s.points for s in u.sessions),
-            total_reps=sum(s.reps for s in u.sessions),
+            points=sum(s.points for s in sessions),
+            total_reps=sum(s.reps for s in sessions),
+            total_volume_kg=round(sum((s.weight_kg or 0) * s.reps for s in sessions), 1),
+            week_volume_kg=round(sum((s.weight_kg or 0) * s.reps for s in week), 1),
+            week_reps=sum(s.reps for s in week),
+            muscles_active=active, muscles_total=total,
+            muscles_pct=round(100 * active / total) if total else 0,
         ))
+    weekly = period == "week"
     keys = {
         "week_streak": lambda r: (r["week_streak"], r["days_this_week"], r["total_reps"]),
         "week": lambda r: (r["days_this_week"], r["week_streak"], r["total_reps"]),
-        "reps": lambda r: (r["total_reps"], r["week_streak"]),
+        "muscles": lambda r: (r["muscles_active"], r["week_volume_kg"]),
+        "volume": lambda r: (r["week_volume_kg"] if weekly else r["total_volume_kg"], r["total_reps"]),
+        "reps": lambda r: (r["week_reps"] if weekly else r["total_reps"], r["week_streak"]),
     }
     rows.sort(key=keys.get(by, keys["week_streak"]), reverse=True)
     out: list[LeaderboardEntry] = []
     for rank, r in enumerate(rows, start=1):
-        is_me = r["user"].id == me_id
+        u = r.pop("user")
+        is_me = u.id == me_id
         if rank > limit and not is_me:
             continue
-        out.append(LeaderboardEntry(
-            rank=rank, display_name=r["user"].display_name, points=r["points"],
-            total_reps=r["total_reps"], is_me=is_me,
-            week_streak=r["week_streak"], best_week_streak=r["best_week_streak"],
-            days_this_week=r["days_this_week"], week_goal_days=WEEK_GOAL_DAYS,
-        ))
+        out.append(LeaderboardEntry(rank=rank, display_name=u.display_name, is_me=is_me,
+                                    week_goal_days=WEEK_GOAL_DAYS, **r))
     return out

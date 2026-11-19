@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gympath/models/cable_exercise.dart';
 import 'package:gympath/models/training_stats.dart';
 import 'package:gympath/models/workout_session.dart';
 import 'package:gympath/services/api_service.dart';
@@ -40,6 +41,19 @@ void main() {
       expect(WeekStreak.of(days([-14, -12, -10, -7, -5, -3, 1]), DateTime(2026, 11, 19), 3).current, 2);
       expect(WeekStreak.of(days([-7, -5, -3, 0, 1, 2]), DateTime(2026, 11, 19), 3).current, 2);
     });
+  });
+
+  test('muscle coverage matches the server (backend/app/exercises.py)', () {
+    // Same groups and rules as the server's muscle_coverage.
+    expect(trainableMuscleGroups.length, 13);
+    expect(trainableMuscleGroups, isNot(contains('quads')));
+    WorkoutSession at(String name) => WorkoutSession(
+        workoutName: name, reps: 10, durationSec: 30, timestamp: DateTime(2026, 11, 17, 18));
+    final t = TrainingStats([at('Face Pull')]);
+    final week = (DateTime(2026, 11, 16), DateTime(2026, 11, 23));
+    expect(t.muscleCoverage(week.$1, week.$2), (3, 13));
+    final two = TrainingStats([at('Lat Pulldown'), at('Lat Pulldown')]);
+    expect(two.muscleCoverage(week.$1, week.$2).$1, 6);
   });
 
   group('server', () {
@@ -106,6 +120,17 @@ void main() {
           }),
           'Password: needs 6 or more characters');
       expect(ApiService.errorMessage(500, null), 'Server error 500');
+      final full = LeaderboardEntry.fromJson({
+        'rank': 1, 'display_name': 'A', 'total_reps': 50, 'week_reps': 20,
+        'total_volume_kg': 1800.5, 'week_volume_kg': 600, 'muscles_active': 8,
+        'muscles_total': 13, 'muscles_pct': 62,
+      });
+      expect(full.totalVolumeKg, 1800.5);
+      expect(full.weekReps, 20);
+      expect(full.musclesPct, 62);
+      expect(LeaderboardSort.volume.hasPeriod, isTrue);
+      expect(LeaderboardSort.muscles.hasPeriod, isFalse);
+      expect(LeaderboardSort.muscles.param, 'muscles');
     });
   });
 }

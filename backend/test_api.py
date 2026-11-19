@@ -151,6 +151,27 @@ def main():
     assert c.get("/leaderboard?by=nope", headers=h).status_code == 422
     print("leaderboard by week streak / reps OK")
 
+    # this week: Bat covers more muscles, I move more weight
+    from app.exercises import TRAINABLE, muscle_coverage
+    assert muscle_coverage(["Face Pull"]) == (3, len(TRAINABLE))
+    assert muscle_coverage(["Lat Pulldown", "Lat Pulldown"])[0] == 6  # 1 prime + 5 assisting x2
+    now = datetime.now().replace(microsecond=0)
+    c.post("/sessions/bulk", headers=h2, json={"sessions": [
+        {"workout_name": n, "reps": 10, "weight_kg": 10, "client_timestamp": now.isoformat()}
+        for n in ("Seated Cable Row", "Cable Chest Fly", "Tricep Pushdown")]})
+    c.post("/sessions/bulk", headers=h, json={"sessions": [
+        {"workout_name": "Lat Pulldown", "reps": 10, "weight_kg": 60, "client_timestamp": now.isoformat()}]})
+    lb = c.get("/leaderboard?by=muscles", headers=h).json()
+    assert lb[0]["display_name"] == "Bat" and lb[0]["muscles_pct"] > lb[1]["muscles_pct"], lb
+    assert lb[0]["muscles_total"] == len(TRAINABLE), lb
+    lb = c.get("/leaderboard?by=volume&period=week", headers=h).json()
+    assert lb[0]["is_me"] and lb[0]["week_volume_kg"] == 600, lb
+    lb = c.get("/leaderboard?by=volume", headers=h).json()  # all time
+    assert lb[0]["is_me"] and lb[0]["total_volume_kg"] == 1800, lb  # 3 x 40 x 10 + 600
+    lb = c.get("/leaderboard?by=reps&period=week", headers=h).json()
+    assert lb[0]["display_name"] == "Bat" and lb[0]["week_reps"] == 30, lb
+    print("leaderboard by muscles / volume / weekly reps OK")
+
     print("\nALL BACKEND TESTS PASSED")
 
 

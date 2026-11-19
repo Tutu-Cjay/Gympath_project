@@ -91,3 +91,11 @@ class LeaderboardEntry(BaseModel):
     best_week_streak: int = 0
     days_this_week: int = 0
     week_goal_days: int = 3
+    # Weight moved (weight x reps, kg) and reps: all time and this week.
+    total_volume_kg: float = 0
+    week_volume_kg: float = 0
+    week_reps: int = 0
+    # Muscle groups worked this week out of those the exercises can train.
+    muscles_active: int = 0
+    muscles_total: int = 0
+    muscles_pct: int = 0

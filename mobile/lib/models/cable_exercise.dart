@@ -280,3 +280,11 @@ CableExercise? cableExerciseByName(String name) {
   }
   return null;
 }
+
+/// The muscle groups the exercises can train (prime or assisting). The
+/// leaderboard's muscle share counts against these, so 100% is reachable.
+/// The server keeps a copy (backend/app/exercises.py).
+final List<String> trainableMuscleGroups = [
+  for (final g in muscleGroupLabels.keys)
+    if (cableExercises.any((e) => e.primary.contains(g) || e.secondary.contains(g))) g,
+];
