@@ -155,6 +155,15 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 | 21 | u8 | muscle groups worked today |
 | 22 | u8 | muscle groups the exercises can train |
 
+#### 13. Settings (Read, Write) — `firmware/Gympath_Track` 1.5+
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdefd` |
+| Properties | Read, Write |
+| Data Format | write `[1, theme]`; read `[1, theme, theme count]` |
+| Description | Rep screen theme: 0 Classic, 1 Stroke, 2 Tempo, 3 Minimal. Kept in flash |
+
 ## USB Test Mode (no Bluetooth — emulator testing)
 
 `tools/serial_bridge.py` relays the tracker's UART (921600 baud) to TCP

@@ -7,8 +7,8 @@ import '../services/routine_store.dart';
 import '../services/workout_store.dart';
 import 'leaderboard_screen.dart';
 import 'plan_screen.dart';
+import 'tracker_screen.dart';
 import 'choose_workout_screen.dart';
-import 'firmware_update_screen.dart';
 import 'anatomy_studio_screen.dart';
 import 'avatar_screen.dart';
 import 'progress_screen.dart';
@@ -99,14 +99,13 @@ class _HomeTab extends StatelessWidget {
                                 ),
                               ),
                               IconButton(
-                                tooltip: 'Firmware update',
-                                icon: const Icon(Icons.system_update_rounded),
+                                tooltip: 'Tracker: screen, battery, updates',
+                                icon: const Icon(Icons.watch_rounded),
                                 color: AppTheme.textSecondary,
                                 onPressed: () => Navigator.push(
                                   context,
                                   MaterialPageRoute(
-                                    builder: (_) =>
-                                        const FirmwareUpdateScreen(),
+                                    builder: (_) => const TrackerScreen(),
                                   ),
                                 ),
                               ),

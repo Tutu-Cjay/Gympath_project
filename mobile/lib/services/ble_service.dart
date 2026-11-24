@@ -78,6 +78,13 @@ class BleService {
   static const String daySummaryUuid = '12345678-1234-5678-1234-56789abcdefc';
   final ValueNotifier<bool> daySummarySupported = ValueNotifier<bool>(false);
   BluetoothCharacteristic? _dayChar;
+
+  /// Tracker settings (firmware 1.5+, …cdefd): [1, rep screen theme].
+  static const String settingsUuid = '12345678-1234-5678-1234-56789abcdefd';
+  BluetoothCharacteristic? _settingsChar;
+
+  /// The tracker's rep screen theme; null when unknown or not supported.
+  final ValueNotifier<int?> trackerTheme = ValueNotifier<int?>(null);
   StreamSubscription<List<int>>? _batterySub;
 
   BluetoothDevice? _device;
@@ -446,6 +453,27 @@ class BleService {
     }
     _dayChar = find(daySummaryUuid);
     daySummarySupported.value = _dayChar != null;
+    _settingsChar = find(settingsUuid);
+    if (_settingsChar != null) {
+      try {
+        final v = await _settingsChar!.read();
+        trackerTheme.value = v.length >= 2 && v[0] == 1 ? v[1] : null;
+      } catch (_) {}
+    }
+  }
+
+  /// Choose the tracker's rep screen theme (0 Classic … 3 Minimal).
+  Future<bool> setTrackerTheme(int theme) async {
+    final c = _settingsChar;
+    if (c == null) return false;
+    try {
+      await c.write([1, theme], withoutResponse: false);
+      final v = await c.read();
+      trackerTheme.value = v.length >= 2 && v[0] == 1 ? v[1] : theme;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   void _clearDeviceInfo() {
@@ -455,6 +483,8 @@ class BleService {
     batteryCharging.value = false;
     _dayChar = null;
     daySummarySupported.value = false;
+    _settingsChar = null;
+    trackerTheme.value = null;
   }
 
   /// Send today's numbers to the tracker's idle screen.

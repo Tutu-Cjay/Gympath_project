@@ -120,6 +120,9 @@ screens={
  'ota':[('FONT_MED',100,'UPDATE'),('FONT_MED',138,'100%')],
  'otafail':[('FONT_MED',100,'UPDATE'),('FONT_MED',138,'FAILED')],
  'sensor':[('FONT_MED',100,'SENSOR'),('FONT_MED',138,'ERROR')],
+ 'theme stroke':[('FONT_BIG',112,'888'),('FONT_SMALL',150,'reps')],
+ 'theme tempo':[('FONT_MED',62,'LOWER'),('FONT_BIG',118,'888'),('FONT_SMALL',166,'up 9.9s  down 9.9s'),('FONT_TINY',186,'last rep')],
+ 'theme minimal':[('FONT_BIG',120,'888')],
 }
 for name,items in screens.items():
     bx=[]
@@ -169,7 +172,8 @@ def preview(path):
     out.resize((480, 480), Image.NEAREST).save(path)
 
 
-if len(sys.argv) > 2 and sys.argv[1] == "--preview":
-    preview(sys.argv[2])
-print("layout problems:", bad)
-sys.exit(1 if bad else 0)
+if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "--preview":
+        preview(sys.argv[2])
+    print("layout problems:", bad)
+    sys.exit(1 if bad else 0)

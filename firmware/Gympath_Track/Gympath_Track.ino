@@ -24,6 +24,10 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.5.0: four rep screen themes, chosen in the app: Classic (7-segment
+ * count, speed ring), Stroke (the ring fills with each rep's travel),
+ * Tempo (lift / lower phase and the last rep's up / down time), Minimal
+ * (big count, a dot per rep). Kept across restarts.
  * 1.4.0: more accurate positions: rest is only accepted when the tracked
  * speed is low too (smooth mid-stroke motion no longer reads as rest);
  * drift is removed at every rest (back-correction of the movement) and at
@@ -80,10 +84,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.4.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.5.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-13"
+#define FW_BUILD     "TRACK-1D-14"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -110,6 +114,7 @@ TFT_eSPI tft;
 #define VER_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefb"  // FW_VERSION
 #define BAT_CHAR_UUID    "12345678-1234-5678-1234-56789abcdef5"  // battery %
 #define DAY_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefc"  // app → day summary
+#define SET_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefd"  // settings (rep screen theme)
 
 // OTA over BLE (written to …cdefa, with response = flow control):
 //   BEGIN [1, size u32 LE, md5 16 B]   DATA [2, bytes…]   END [3]   ABORT [4]
@@ -275,6 +280,22 @@ volatile uint16_t dayVersion = 0;       // bumps on every new packet
 volatile bool     daySavePending = false;
 Preferences       prefs;
 
+// Rep screen theme, chosen in the app (…cdefd: [1, theme]); kept in NVS.
+//   0 Classic  7-segment count, ring coloured by speed
+//   1 Stroke   the ring fills with the stack's travel through each rep
+//   2 Tempo    lift / lower phase and the last rep's up / down time
+//   3 Minimal  big count and one dot per rep around the edge
+const uint8_t     THEME_COUNT = 4;
+volatile uint8_t  repTheme = 0;
+volatile bool     themeSavePending = false;
+volatile uint16_t themeVersion = 0;   // bumps on a change: the screen redraws
+
+// For the themes: where the stack is in the stroke and the rep's tempo
+// (written by the tracking on core 1, read by the display on core 0).
+volatile float    strokeFrac = 0;     // 0 = start of the stroke, 1 = top of the last rep
+volatile int8_t   phase = 0;          // +1 lifting, −1 lowering, 0 holding
+volatile uint16_t tempoUpMs = 0, tempoDownMs = 0;   // the last counted rep
+
 // Battery: GPIO1 through a 200k/100k divider (Waveshare ESP32-S3-LCD-1.28).
 const int      BAT_PIN = 1;
 float          vbat = 0;                // smoothed, V
@@ -371,8 +392,16 @@ static inline void norm3(float a[3]) {
   if (n > 1e-6f) { a[0] /= n; a[1] /= n; a[2] /= n; }
 }
 
+// stroke / tempo bookkeeping for the rep screen themes
+float    strokeBase = 0;     // where the current (or last) stroke started
+int8_t   strokeDir = 0;
+float    lastRangeM = 0.30f; // travel of the last counted rep (0.30 until one)
+uint32_t strokeStartMs = 0, strokePeakMs = 0;
+
 void resetReps() {
   repBase = p; repPeak = 0; repDir = 0; lastDir = 0;
+  strokeBase = p; strokeDir = 0; lastRangeM = 0.30f;
+  strokeFrac = 0; phase = 0; tempoUpMs = tempoDownMs = 0;
 }
 
 void resetMotion() {
@@ -593,6 +622,14 @@ void trackStep(const float a[3], float w[3], float dt) {
 }
 
 void repStep() {
+  uint32_t nowMs = millis();
+  phase = v > 0.05f ? 1 : (v < -0.05f ? -1 : 0);
+  if (strokeDir != 0) {
+    float f = (p - strokeBase) * strokeDir / fmaxf(lastRangeM, 0.05f);
+    strokeFrac = f < 0 ? 0 : (f > 1 ? 1 : f);
+  } else {
+    strokeFrac = 0;
+  }
   if (repDir == 0) {
     // Between reps the start point follows the stack: at rest, and while it
     // keeps travelling back after a counted rep (so the next rep starts from
@@ -604,16 +641,26 @@ void repStep() {
     if (fabsf(d) >= REP_MIN_DISP) {
       repDir = d > 0 ? 1 : -1;
       repPeak = fabsf(d);
+      strokeBase = repBase; strokeDir = repDir;
+      // the stroke began when it left the start point, a moment ago
+      strokeStartMs = nowMs - (uint32_t)(1000.0f * REP_MIN_DISP / fmaxf(fabsf(v), 0.05f));
+      strokePeakMs = nowMs;
     }
     return;
   }
   float out = (p - repBase) * repDir;  // distance from the start, outwards
-  if (out > repPeak) repPeak = out;
+  if (out > repPeak) { repPeak = out; strokePeakMs = nowMs; }
   if (out <= (1.0f - REP_RETURN_FRAC) * repPeak) {
     reps = reps + 1;
     lastDir = repDir;
     repDir = 0;
     repBase = p;
+    lastRangeM = repPeak;
+    uint32_t upMs = strokePeakMs - strokeStartMs;
+    // counted 60 % of the way back: the whole way down takes about 1/0.6 of it
+    uint32_t downMs = (uint32_t)((nowMs - strokePeakMs) / REP_RETURN_FRAC);
+    tempoUpMs = (uint16_t)(upMs > 60000 ? 60000 : upMs);
+    tempoDownMs = (uint16_t)(downMs > 60000 ? 60000 : downMs);
   }
 }
 
@@ -987,6 +1034,88 @@ void updateDashboard() {
   textDelta(dv.l3, sizeof dv.l3, line, 120, 215, FONT_TINY, met ? COL_GREEN : COL_MUTED);
 }
 
+/* ================= REP SCREEN THEMES ================= */
+// What a theme last drew (reset when the screen is drawn fresh).
+struct RepView {
+  char     big[8];        // count
+  char     word[12];      // Tempo: LIFT / LOWER / HOLD
+  char     tempo[32];     // Tempo: last rep's times
+  uint32_t ringEnd;       // Stroke: end angle of the fill
+  uint16_t ringCol;       // Stroke / Tempo: colour of the fill / ring
+  int      dots;          // Minimal: dots drawn
+};
+RepView rv;
+
+uint16_t phaseColor(int8_t ph) {
+  return ph > 0 ? COL_GREEN : ph < 0 ? COL_BLUE : COL_MUTED_G;
+}
+
+void themeFresh(uint8_t th) {
+  memset(&rv, 0, sizeof rv);
+  rv.ringEnd = RING_A0;
+  switch (th) {
+    case 1:   // Stroke: an open ring that fills with the stack's travel
+      tft.drawSmoothArc(120, 120, 118, 104, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
+      say(FONT_SMALL, "reps", 120, 150, COL_MUTED);
+      break;
+    case 2:   // Tempo: a thin ring in the phase colour
+      tft.drawSmoothArc(120, 120, 118, 112, 0, 360, COL_TRACK, TFT_BLACK, false);
+      rv.ringCol = COL_TRACK;
+      say(FONT_TINY, "last rep", 120, 186, COL_MUTED);
+      break;
+    default:
+      break;
+  }
+}
+
+void themeStroke(int r) {
+  char line[8];
+  snprintf(line, sizeof line, "%d", r);
+  textDelta(rv.big, sizeof rv.big, line, 120, 112, FONT_BIG, TFT_WHITE);
+  uint32_t end = ringEnd(strokeFrac);
+  end -= (end - RING_A0) % 2;                       // 2° steps
+  uint16_t c = phaseColor(phase);
+  if (c != rv.ringCol && end > RING_A0) {           // new phase: recolour the fill
+    tft.drawArc(120, 120, 118, 104, RING_A0, end, c, TFT_BLACK, true);
+    if (rv.ringEnd > end)
+      tft.drawArc(120, 120, 118, 104, end, rv.ringEnd, COL_TRACK, TFT_BLACK, true);
+    rv.ringEnd = end;
+  } else {
+    ringDelta(118, 104, rv.ringEnd, end, c);
+  }
+  rv.ringCol = c;
+}
+
+void themeTempo(int r) {
+  int8_t ph = phase;
+  uint16_t c = phaseColor(ph);
+  if (c != rv.ringCol) {
+    tft.drawSmoothArc(120, 120, 118, 112, 0, 360, c, TFT_BLACK, false);
+    rv.ringCol = c;
+  }
+  textDelta(rv.word, sizeof rv.word, ph > 0 ? "LIFT" : ph < 0 ? "LOWER" : "HOLD", 120, 62, FONT_MED, c);
+  char line[32];
+  snprintf(line, sizeof line, "%d", r);
+  textDelta(rv.big, sizeof rv.big, line, 120, 118, FONT_BIG, TFT_WHITE);
+  if (tempoUpMs || tempoDownMs)
+    snprintf(line, sizeof line, "up %.1fs  down %.1fs", tempoUpMs / 1000.0f, tempoDownMs / 1000.0f);
+  else
+    snprintf(line, sizeof line, "up -  down -");
+  textDelta(rv.tempo, sizeof rv.tempo, line, 120, 166, FONT_SMALL, TFT_WHITE);
+}
+
+void themeMinimal(int r) {
+  char line[8];
+  snprintf(line, sizeof line, "%d", r);
+  textDelta(rv.big, sizeof rv.big, line, 120, 120, FONT_BIG, TFT_WHITE);
+  int want = r > 30 ? 30 : r;                       // one dot per rep, 12° apart
+  for (; rv.dots < want; rv.dots++) {
+    float a = rv.dots * 12.0f * DEG_TO_RAD;
+    tft.fillSmoothCircle(120 + (int)roundf(108 * sinf(a)), 120 - (int)roundf(108 * cosf(a)),
+                         4, COL_GREEN, TFT_BLACK);
+  }
+}
+
 void displayTask(void*) {
   uint8_t  shownState = 0xFF;   // which status screen is up
   bool     shownTest = false;
@@ -1070,10 +1199,17 @@ void displayTask(void*) {
     uint8_t B = t < 0.5f ? (uint8_t)((1 - t * 2) * 255) : 0;
     uint16_t color = st == ST_TRACK ? tft.color565(R, G, B) : 0x5E89;
 
-    // a different status screen: clear the inside once, draw its text
-    if (st != shownState || tm != shownTest) {
-      tft.fillCircle(120, 120, 104, TFT_BLACK);
+    // a different status screen (or theme): clear once, draw its text
+    static uint16_t shownTheme = 0xFFFF;
+    static int lastReps = 0;
+    int r = reps;
+    bool themed = st == ST_TRACK && repTheme != 0;
+    if (st != shownState || tm != shownTest || themeVersion != shownTheme ||
+        (themed && r < lastReps)) {                 // count reset: start over
+      tft.fillScreen(TFT_BLACK);
       segShown[0] = 0;
+      shownTheme = themeVersion;
+      if (st == ST_TRACK) themeFresh(repTheme);
       switch (st) {
         case ST_IDLE:       say(FONT_MED, "READY", 120, 110, TFT_WHITE);   // USB test only
                             say(FONT_SMALL, "press Start", 120, 142, COL_MUTED); break;
@@ -1097,13 +1233,23 @@ void displayTask(void*) {
       shownTest = tm;
       ringColor = 0;
     }
-    // the ring repaints only when its colour changes (one arc, not 16 circles)
+    lastReps = r;
+    if (themed) {
+      switch (repTheme) {
+        case 1: themeStroke(r); break;
+        case 2: themeTempo(r); break;
+        case 3: themeMinimal(r); break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(40));
+      continue;
+    }
+    // Classic: the ring repaints only when its colour changes (one arc)
     if (color != ringColor) {
       tft.drawSmoothArc(120, 120, 119, 105, 0, 360, color, TFT_BLACK, false);
       ringColor = color;
     }
     // the rep count changes only the segments that switch
-    if (st == ST_TRACK) update7Seg(reps, 120, 120, color);
+    if (st == ST_TRACK) update7Seg(r, 120, 120, color);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -1199,6 +1345,27 @@ class DayCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+// …cdefd: [1, theme] from the app; reads back [1, theme, theme count].
+NimBLECharacteristic* setChar = nullptr;
+void setValueOfSettings() {
+  if (!setChar) return;
+  uint8_t b[3] = {1, repTheme, THEME_COUNT};
+  setChar->setValue(b, 3);
+}
+class SettingsCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
+    NimBLEAttValue val = c->getValue();
+    if (val.length() < 2 || val.data()[0] != 1) { setValueOfSettings(); return; }
+    uint8_t t = val.data()[1];
+    if (t < THEME_COUNT && t != repTheme) {
+      repTheme = t;
+      themeSavePending = true;
+      themeVersion = themeVersion + 1;
+    }
+    setValueOfSettings();
+  }
+};
+
 /* ================= BLE ================= */
 void setupBLE() {
   NimBLEDevice::init("Smart Tracker");
@@ -1230,6 +1397,10 @@ void setupBLE() {
   dayChar    = s->createCharacteristic(DAY_CHAR_UUID,
                  NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   dayChar->setCallbacks(new DayCallbacks());
+  setChar    = s->createCharacteristic(SET_CHAR_UUID,
+                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  setChar->setCallbacks(new SettingsCallbacks());
+  setValueOfSettings();
   s->start();
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);
@@ -1328,6 +1499,8 @@ void setup() {
 
   // the last day summary survives a restart (the clock does not)
   prefs.begin("gympath", false);
+  repTheme = prefs.getUChar("theme", 0);
+  if (repTheme >= THEME_COUNT) repTheme = 0;
   DayPacket saved;
   if (prefs.getBytes("day", &saved, sizeof saved) == sizeof saved && saved.ver == 1) {
     day = saved;
@@ -1356,6 +1529,10 @@ void loop() {
   // new firmware verified and written → give the DONE notify time to go out
   if (otaRebootPending && sinceMs(otaDoneMs) > 1500) ESP.restart();
 
+  if (themeSavePending) {
+    themeSavePending = false;
+    prefs.putUChar("theme", repTheme);
+  }
   if (daySavePending) {
     daySavePending = false;
     DayPacket copy = day;
