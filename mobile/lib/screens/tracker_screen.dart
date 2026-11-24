@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -359,31 +360,24 @@ class _TrackerScreenState extends State<TrackerScreen>
     final savedT = _ble.trackerTheme.value, savedS = _ble.trackerDigits.value;
     return Column(children: [
       LayoutBuilder(builder: (context, box) {
-        final size = (box.maxWidth - 40).clamp(180.0, 300.0);
-        _pageW = size;
-        final win = trackerCountWindows[ti];
-        _pageH = win[3] * size / 240;
-        return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          const SizedBox(width: 20),
+        final wheel = TrackerWheel.layoutFor(box.maxWidth);
+        // px of finger travel per page: the front face / the count follow it
+        _pageW = wheel.radius * math.pi / 2;
+        _pageH = TrackerWheel.drumRadius(ti, wheel.face) * math.pi / 2;
+        return Stack(children: [
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onPanStart: _onPanStart,
             onPanUpdate: _onPanUpdate,
             onPanEnd: _onPanEnd,
-            child: Container(
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF333333), width: 2),
-                boxShadow: [
-                  BoxShadow(color: AppTheme.neonGreen.withValues(alpha: .10), blurRadius: 24),
-                ],
-              ),
-              child: ClipOval(child: TrackerPreview(theme: _t, style: _s, size: size)),
-            ),
+            child: TrackerWheel(theme: _t, style: _s, layout: wheel),
           ),
-          SizedBox(width: 20, child: _dots(trackerDigitStyles.length, _s, Axis.vertical)),
+          Positioned(
+            right: 0,
+            top: wheel.faceTop,
+            height: wheel.face,
+            child: Center(child: _dots(trackerDigitStyles.length, _s, Axis.vertical)),
+          ),
         ]);
       }),
       const SizedBox(height: 10),
@@ -524,53 +518,238 @@ class _TrackerScreenState extends State<TrackerScreen>
   }
 }
 
-/// The tracker's round screen at a preview position, drawn the way the
-/// firmware's live preview composes it: [theme] between two themes slides
-/// the whole screen sideways; [style] between two styles slides only the
-/// count, up and down inside its own window in the middle of the theme.
-class TrackerPreview extends StatelessWidget {
-  final double theme, style, size;
-  const TrackerPreview({super.key, required this.theme, required this.style, required this.size});
+/// Sizes of the theme wheel for a given width.
+class WheelLayout {
+  final double width, face, radius, lift, faceTop, height;
+  const WheelLayout(this.width, this.face, this.radius, this.lift, this.faceTop, this.height);
+}
+
+/// The themes stand on one ring, seen from a little above, and the ring
+/// turns: the chosen theme in front, the others round the back, smaller and
+/// darker, with a soft reflection on the floor. On the front face the count
+/// sits on a drum of number styles that turns up and down.
+class TrackerWheel extends StatelessWidget {
+  final double theme, style;
+  final WheelLayout layout;
+  const TrackerWheel({super.key, required this.theme, required this.style, required this.layout});
+
+  static WheelLayout layoutFor(double width) {
+    final face = (width * 0.58).clamp(150.0, 250.0);
+    final radius = width * 0.34;        // ring, sideways
+    final lift = face * 0.20;           // the back of the ring sits higher
+    const top = 4.0;
+    return WheelLayout(width, face, radius, lift, top + lift, top + lift + face * 1.32);
+  }
+
+  /// Radius of the number drum on a face of [size] px, theme [theme].
+  static double drumRadius(int theme, double size) =>
+      trackerCountWindows[theme][3] * size / 240 / 2;
 
   @override
   Widget build(BuildContext context) {
-    final nt = trackerThemes.length, ns = trackerDigitStyles.length;
-    final t = theme.clamp(0.0, nt - 1.0), s = style.clamp(0.0, ns - 1.0);
-    final ta = t.floor().clamp(0, nt - 1), sa = s.floor().clamp(0, ns - 1);
-    final tf = t - ta, sf = s - sa;
-    final k = size / 240;
-    Widget page(int th, int st) => Image.asset(trackerPage(th, st),
-        width: size, height: size, fit: BoxFit.fill,
-        gaplessPlayback: true, filterQuality: FilterQuality.medium);
-
-    final children = <Widget>[
-      // themes, side by side
-      for (final i in [ta, if (tf > 0 && ta + 1 < nt) ta + 1])
-        Positioned(left: (i - t) * size, top: 0, child: page(i, s.round())),
-    ];
-    if (sf > 0 && tf == 0 && sa + 1 < ns) {
-      // number styles: one above the other inside the count's window
-      final w = trackerCountWindows[ta];
-      final wx = w[0] * k, wy = w[1] * k, ww = w[2] * k, wh = w[3] * k;
-      children.add(Positioned(
-        left: wx,
-        top: wy,
-        width: ww,
-        height: wh,
-        child: ClipRect(
-          child: Stack(clipBehavior: Clip.none, children: [
-            Positioned(left: -wx, top: -wy - sf * wh, child: page(ta, sa)),
-            Positioned(left: -wx, top: -wy + (1 - sf) * wh, child: page(ta, sa + 1)),
-          ]),
+    final n = trackerThemes.length;
+    final lo = layout;
+    final items = <({double depth, Widget w})>[];
+    for (var i = 0; i < n; i++) {
+      var phi = (i - theme) * 2 * math.pi / n;
+      while (phi > math.pi) { phi -= 2 * math.pi; }
+      while (phi <= -math.pi) { phi += 2 * math.pi; }
+      final d = math.cos(phi);                     // 1 front … −1 back
+      final scale = 0.52 + 0.48 * (d + 1) / 2;
+      final size = lo.face * scale;
+      final cx = lo.width / 2 + lo.radius * math.sin(phi);
+      final top = lo.faceTop - lo.lift * (1 - d) / 2;
+      final dim = (1 - d) / 2;                     // 0 front … 1 back
+      final face = TrackerFace(theme: i, style: style, size: size);
+      items.add((
+        depth: d,
+        w: Positioned(
+          left: cx - size / 2,
+          top: top,
+          width: size,
+          child: Transform(
+            alignment: Alignment.center,
+            transform: Matrix4.identity()
+              ..setEntry(3, 2, 0.0012)
+              ..rotateY(-phi * 0.45),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              _Shade(amount: dim * 0.7, child: _rim(face, size, d)),
+              SizedBox(height: size * 0.04),
+              _Reflection(size: size, strength: 0.26 * (1 - dim), child: face),
+            ]),
+          ),
         ),
       ));
     }
+    items.sort((a, b) => a.depth.compareTo(b.depth)); // back first
+    return SizedBox(
+      width: lo.width,
+      height: lo.height,
+      child: Stack(clipBehavior: Clip.hardEdge, children: [
+        // the floor the ring stands on
+        Positioned(
+          left: 0,
+          right: 0,
+          top: lo.faceTop + lo.face * 0.98,
+          height: lo.face * 0.34,
+          child: const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment.topCenter,
+                radius: 1.1,
+                colors: [Color(0x2200FF88), Color(0x00000000)],
+              ),
+            ),
+          ),
+        ),
+        for (final it in items) it.w,
+      ]),
+    );
+  }
+
+  Widget _rim(Widget face, double size, double d) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: const Color(0xFF3A3A3A), width: 2),
+          boxShadow: [
+            BoxShadow(
+                color: AppTheme.neonGreen.withValues(alpha: .14 * math.max(0.0, d)),
+                blurRadius: 22),
+          ],
+        ),
+        child: ClipOval(child: face),
+      );
+}
+
+/// Darkens a face that has turned away.
+class _Shade extends StatelessWidget {
+  final double amount;
+  final Widget child;
+  const _Shade({required this.amount, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    if (amount <= 0.01) return child;
+    return ColorFiltered(
+      colorFilter: ColorFilter.mode(
+          Colors.black.withValues(alpha: amount.clamp(0.0, 1.0)), BlendMode.srcATop),
+      child: child,
+    );
+  }
+}
+
+/// The face mirrored on a glossy floor, fading out.
+class _Reflection extends StatelessWidget {
+  final double size, strength;
+  final Widget child;
+  const _Reflection({required this.size, required this.strength, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size * 0.28,
+      child: ClipRect(
+        child: Opacity(
+          opacity: strength.clamp(0.0, 1.0),
+          child: ShaderMask(
+            blendMode: BlendMode.dstIn,
+            shaderCallback: (r) => const LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Colors.white, Colors.transparent],
+            ).createShader(r),
+            child: OverflowBox(
+              alignment: Alignment.topCenter,
+              minHeight: size,
+              maxHeight: size,
+              child: Transform.flip(
+                flipY: true,
+                child: ClipOval(child: SizedBox(width: size, height: size, child: child)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One tracker face: theme [theme] with the count's drum of number styles
+/// at [style] (between two styles the drum is turning).
+class TrackerFace extends StatelessWidget {
+  final int theme;
+  final double style, size;
+  const TrackerFace({super.key, required this.theme, required this.style, required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    final ns = trackerDigitStyles.length;
+    final s = style.clamp(0.0, ns - 1.0);
+    final sa = s.floor().clamp(0, ns - 1);
+    final sf = s - sa;
+    final k = size / 240;
+    Widget page(int st) => Image.asset(trackerPage(theme, st),
+        width: size, height: size, fit: BoxFit.fill,
+        gaplessPlayback: true, filterQuality: FilterQuality.medium);
+
+    if (sf == 0) {
+      return SizedBox(width: size, height: size, child: ColoredBox(color: Colors.black, child: page(sa)));
+    }
+    final w = trackerCountWindows[theme];
+    final wx = w[0] * k, wy = w[1] * k, ww = w[2] * k, wh = w[3] * k;
+    final r = wh / 2;
+    // the styles round the drum, a quarter turn apart; the near half shows
+    final drum = <({double z, Widget w})>[];
+    for (var j = 0; j < ns; j++) {
+      final a = (j - s) * math.pi / 2;
+      if (a.abs() >= math.pi / 2) continue;
+      final crop = SizedBox(
+        width: ww,
+        height: wh,
+        child: ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.topLeft,
+            minWidth: size, maxWidth: size, minHeight: size, maxHeight: size,
+            child: Transform.translate(offset: Offset(-wx, -wy), child: page(j)),
+          ),
+        ),
+      );
+      drum.add((
+        z: math.cos(a),
+        w: Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.004)
+            ..translate(0.0, r * math.sin(a))
+            ..rotateX(a),
+          child: _Shade(amount: (1 - math.cos(a)) * 0.8, child: crop),
+        ),
+      ));
+    }
+    drum.sort((a, b) => a.z.compareTo(b.z));
     return SizedBox(
       width: size,
       height: size,
       child: ColoredBox(
         color: Colors.black,
-        child: Stack(clipBehavior: Clip.hardEdge, children: children),
+        child: Stack(clipBehavior: Clip.hardEdge, children: [
+          page(s.round()),
+          Positioned(
+            left: wx,
+            top: wy,
+            width: ww,
+            height: wh,
+            child: ClipRect(
+              child: ColoredBox(
+                color: Colors.black,
+                child: Stack(children: [for (final d in drum) d.w]),
+              ),
+            ),
+          ),
+        ]),
       ),
     );
   }
