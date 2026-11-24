@@ -1,21 +1,30 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gympath/screens/tracker_preview_data.dart';
 import 'package:gympath/screens/tracker_screen.dart';
 import 'package:gympath/services/ble_service.dart';
 
 void main() {
-  test('tracker themes match the firmware (0..3) and have pictures', () {
+  test('themes and number styles match the firmware (0..3)', () {
     expect(trackerThemes.map((t) => t.id), [0, 1, 2, 3]);
+    expect(trackerDigitStyles.map((d) => d.id), [0, 1, 2, 3]);
+  });
+
+  test('every theme × number style has its preview picture', () {
     for (final t in trackerThemes) {
-      expect(File(t.image).existsSync(), isTrue, reason: t.image);
+      for (final d in trackerDigitStyles) {
+        final path = trackerPage(t.id, d.id);
+        expect(File(path).existsSync(), isTrue, reason: path);
+      }
     }
   });
 
-  test('number styles match the firmware (0..3) and have pictures', () {
-    expect(trackerDigitStyles.map((d) => d.id), [0, 1, 2, 3]);
-    for (final d in trackerDigitStyles) {
-      expect(File(d.image).existsSync(), isTrue, reason: d.image);
+  test('count windows: one per theme, inside the 240 px screen', () {
+    expect(trackerCountWindows.length, trackerThemes.length);
+    for (final w in trackerCountWindows) {
+      expect(w[0] >= 0 && w[1] >= 0 && w[2] > 0 && w[3] > 0, isTrue);
+      expect(w[0] + w[2] <= 240 && w[1] + w[3] <= 240, isTrue);
     }
   });
 
