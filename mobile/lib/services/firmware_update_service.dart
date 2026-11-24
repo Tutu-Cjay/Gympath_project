@@ -136,7 +136,7 @@ class FirmwareUpdateService {
       for (int off = 0; off < image.length; off += chunk) {
         if (deviceError != null) throw Exception(_errText(deviceError!));
         final end = (off + chunk).clamp(0, image.length);
-        await _ble.writeOta([2, ...image.sublist(off, end)]);
+        await _writeChunk([2, ...image.sublist(off, end)], () => deviceError);
         onProgress(end / image.length);
       }
 
@@ -153,6 +153,21 @@ class FirmwareUpdateService {
     } finally {
       await sub.cancel();
       await statuses.close();
+    }
+  }
+
+  /// One DATA write. Android sometimes refuses a write while the link is
+  /// busy (GATT error before anything was sent): wait a moment and resend,
+  /// unless the tracker itself reported a problem or the link is gone.
+  Future<void> _writeChunk(List<int> bytes, int? Function() deviceError) async {
+    for (var attempt = 0;; attempt++) {
+      try {
+        await _ble.writeOta(bytes);
+        return;
+      } catch (e) {
+        if (attempt >= 2 || deviceError() != null || !_ble.isConnected) rethrow;
+        await Future<void>.delayed(Duration(milliseconds: 150 * (attempt + 1)));
+      }
     }
   }
 

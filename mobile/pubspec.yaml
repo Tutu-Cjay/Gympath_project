@@ -19,6 +19,7 @@ dependencies:
   webview_flutter: ^4.11.0
   path_provider: ^2.1.5
   share_plus: ^10.1.4
+  wakelock_plus: ^1.2.8   # screen stays on during a tracker update
 
 dev_dependencies:
   flutter_test:

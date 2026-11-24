@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
 import '../services/ble_service.dart';
@@ -48,6 +49,7 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
   @override
   void dispose() {
     FirmwareUpdateScreen.isOpen = false;
+    WakelockPlus.disable().catchError((_) {});
     super.dispose();
   }
 
@@ -81,6 +83,9 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
   Future<void> _install() async {
     final m = _latest;
     if (m == null) return;
+    // The phone's screen going off (auto-lock after ~30 s) pauses or drops
+    // Bluetooth on many phones, which stopped updates part-way: keep it on.
+    WakelockPlus.enable().catchError((_) {});
     try {
       setState(() {
         _phase = _Phase.downloading;
@@ -96,6 +101,8 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
       setState(() => _phase = _Phase.done);
     } catch (e) {
       _fail(e);
+    } finally {
+      WakelockPlus.disable().catchError((_) {});
     }
   }
 
