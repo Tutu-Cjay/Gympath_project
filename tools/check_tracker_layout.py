@@ -142,8 +142,8 @@ def preview(path):
     d = ImageDraw.Draw(img)
     def arc(r, ir, a0, a1, col):
         d.arc([120 - r, 120 - r, 120 + r, 120 + r], a0 + 90, a1 + 90, fill=col, width=r - ir)
-    arc(118, 108, 40, 320, (40, 40, 44)); arc(118, 108, 40, 40 + int(280 * 0.8), (0, 255, 136))
-    arc(104, 98, 40, 320, (40, 40, 44)); arc(104, 98, 40, 40 + int(280 * 8 / 13), (56, 176, 248))
+    arc(118, 108, 40, 320, (8, 44, 65)); arc(118, 108, 40, 40 + int(280 * 0.8), (0, 255, 136))
+    arc(104, 98, 40, 320, (8, 44, 65)); arc(104, 98, 40, 40 + int(280 * 8 / 13), (56, 176, 248))
     d.ellipse([117, 27, 123, 33], fill=(0, 255, 136))
     txt, f = "82%", F["FONT_TINY"]
     total = 25 + 2 + 5 + V.width(f, txt); x = 120 - total // 2
@@ -152,7 +152,7 @@ def preview(path):
     for i in range(3):
         d.rectangle([x + 3 + i * 5, 41, x + 3 + i * 5 + 3, 47], fill=(0, 255, 136))
     V.render(img, f, txt, x + 32, 44, (0, 255, 136), centre=False)
-    V.render(img, F["FONT_SMALL"], "Tue  10:30", 120, 66, (130, 130, 130))
+    V.render(img, F["FONT_SMALL"], "Tue  10:30", 120, 66, (106, 178, 139))
     V.render(img, F["FONT_BIG"], "48", 120, 106, (255, 255, 255))
     V.render(img, F["FONT_SMALL"], "reps / 60", 120, 138, (0, 255, 136))
     V.render(img, F["FONT_SMALL"], "12 sets  1.8 t", 120, 157, (255, 255, 255))
@@ -160,9 +160,9 @@ def preview(path):
     for i in range(7):
         x = 120 + (i - 3) * 15
         if i < 2: d.ellipse([x - 5, 191, x + 5, 201], fill=(255, 138, 61))
-        else: d.ellipse([x - 4, 192, x + 4, 200], outline=(40, 40, 44))
+        else: d.ellipse([x - 4, 192, x + 4, 200], outline=(32, 85, 115))
         if i == 1: d.ellipse([x - 7, 189, x + 7, 203], outline="white")
-    V.render(img, F["FONT_TINY"], "2/3 - 3 wk streak", 120, 215, (130, 130, 130))
+    V.render(img, F["FONT_TINY"], "2/3 - 3 wk streak", 120, 215, (98, 145, 205))
     mask = Image.new("L", (240, 240), 0)
     ImageDraw.Draw(mask).ellipse([0, 0, 239, 239], fill=255)
     out = Image.new("RGB", (240, 240), (60, 60, 60)); out.paste(img, (0, 0), mask)

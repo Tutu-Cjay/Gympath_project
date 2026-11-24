@@ -24,6 +24,8 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.3.2: greys tinted towards the accents: deep blue-slate ring tracks,
+ * green-grey clock, blue-grey secondary text and empty week dots.
  * 1.3.1: updates no longer fail at a random point: the stall check compared
  * the loop's clock with a later time stamp from the Bluetooth task, which
  * wrapped around and cancelled the update; the battery is not read during
@@ -71,10 +73,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.3.1"     // bump on every release; the app compares it
+#define FW_VERSION   "1.3.2"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-11"
+#define FW_BUILD     "TRACK-1D-12"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -725,8 +727,12 @@ bool textDelta(char* shown, size_t cap, const char* now, int x, int y,
 const uint16_t COL_GREEN  = 0x07F1;   // app neon green #00FF88
 const uint16_t COL_BLUE   = 0x3D9F;
 const uint16_t COL_ORANGE = 0xFC47;   // #FF8A3D
-const uint16_t COL_TRACK  = 0x2945;   // ring background
-const uint16_t COL_MUTED  = 0x8410;
+// Greys are tinted towards the accents so the screen reads as one palette
+// (and RGB565, with its finer green, has no exact neutral grey anyway).
+const uint16_t COL_TRACK  = 0x0968;   // ring background: deep blue-slate #082C41
+const uint16_t COL_MUTED  = 0x6499;   // secondary text: blue-grey #6291CD
+const uint16_t COL_MUTED_G = 0x6D91;  // clock: green-grey #6AB28B
+const uint16_t COL_DOT_OFF = 0x22AE;  // empty week dots: blue-grey #205573
 const uint32_t RING_A0 = 40, RING_SPAN = 280;   // gap at the bottom
 
 // What the dashboard currently shows; valid = false redraws it all.
@@ -834,7 +840,7 @@ void dashDot(int i, bool on, bool today) {
   tft.fillRect(x - 8, DOT_Y - 8, 17, 17, TFT_BLACK);
   if (today) tft.drawSmoothCircle(x, DOT_Y, 7, TFT_WHITE, TFT_BLACK);
   if (on) tft.fillSmoothCircle(x, DOT_Y, 5, COL_ORANGE, TFT_BLACK);
-  else tft.drawSmoothCircle(x, DOT_Y, 4, COL_TRACK, TFT_BLACK);
+  else tft.drawSmoothCircle(x, DOT_Y, 4, COL_DOT_OFF, TFT_BLACK);
 }
 
 void updateDashboard() {
@@ -886,7 +892,7 @@ void updateDashboard() {
   bool connected = bleServer && bleServer->getConnectedCount() > 0;
   if (connected != dv.connected || !dv.linkDrawn) {
     // app link: a dot at the top, between the rings' ends
-    tft.fillSmoothCircle(120, 30, 3, connected ? COL_GREEN : COL_TRACK, TFT_BLACK);
+    tft.fillSmoothCircle(120, 30, 3, connected ? COL_GREEN : COL_DOT_OFF, TFT_BLACK);
     dv.connected = connected;
     dv.linkDrawn = true;
   }
@@ -898,7 +904,7 @@ void updateDashboard() {
                       (unsigned long)(t / 3600 % 24), (unsigned long)(t / 60 % 60));
   else if (synced) snprintf(line, sizeof line, "last sync: %s", DAYS[wd]);
   else snprintf(line, sizeof line, "Gympath");
-  textDelta(dv.top, sizeof dv.top, line, 120, 66, FONT_SMALL, COL_MUTED);
+  textDelta(dv.top, sizeof dv.top, line, 120, 66, FONT_SMALL, COL_MUTED_G);
 
   if (!synced) {
     textDelta(dv.l1, sizeof dv.l1, "READY", 120, 112, FONT_MED, TFT_WHITE);
