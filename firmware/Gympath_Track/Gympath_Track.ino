@@ -24,6 +24,10 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.3.1: updates no longer fail at a random point: the stall check compared
+ * the loop's clock with a later time stamp from the Bluetooth task, which
+ * wrapped around and cancelled the update; the battery is not read during
+ * an update.
  * 1.3.0: subpixel text rendering (like ClearType): glyph edges placed at a
  * third of a pixel using the panel's B-G-R stripes, drawn in one block per
  * text (no flicker).
@@ -67,10 +71,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.3.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.3.1"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-10"
+#define FW_BUILD     "TRACK-1D-11"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -312,8 +316,16 @@ void chargeStep(float v, uint32_t now) {
   batCharging = batPresent && charging;
 }
 
+// Milliseconds since `then`, a millis() stamp another task may have taken
+// just after we read the clock: never negative (unsigned it would wrap to
+// ~49 days).
+static inline uint32_t sinceMs(uint32_t then) {
+  int32_t d = (int32_t)(millis() - then);
+  return d > 0 ? (uint32_t)d : 0;
+}
+
 uint32_t localNow() {
-  return day.localEpoch + (millis() - dayRxMs) / 1000;
+  return day.localEpoch + sinceMs(dayRxMs) / 1000;
 }
 
 // Li-ion resting voltage → %, piecewise linear.
@@ -928,7 +940,7 @@ void displayTask(void*) {
   bool     dashOn = false;
   for (;;) {
     bool otaScreen = otaState == OTA_RECEIVING || otaState == OTA_DONE ||
-                     (otaState == OTA_ERROR && millis() - otaErrorMs < 3000);
+                     (otaState == OTA_ERROR && sinceMs(otaErrorMs) < 3000);
     // leaving the dashboard (a set, an update, an error): clear its rings
     if (dashOn && (state != ST_IDLE || testMode || !imuOk || otaScreen)) {
       tft.fillScreen(TFT_BLACK);
@@ -956,7 +968,7 @@ void displayTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    if (os == OTA_ERROR && millis() - otaErrorMs < 3000) {
+    if (os == OTA_ERROR && sinceMs(otaErrorMs) < 3000) {
       if (lastPct != -2) {
         tft.fillCircle(120, 120, 104, TFT_BLACK);
         say(FONT_MED, "UPDATE", 120, 100, TFT_RED);
@@ -1287,7 +1299,7 @@ void loop() {
   uint32_t now = millis();
 
   // new firmware verified and written → give the DONE notify time to go out
-  if (otaRebootPending && now - otaDoneMs > 1500) ESP.restart();
+  if (otaRebootPending && sinceMs(otaDoneMs) > 1500) ESP.restart();
 
   if (daySavePending) {
     daySavePending = false;
@@ -1296,7 +1308,7 @@ void loop() {
   }
 
   // battery every 2 s (8-sample average, smoothed)
-  if (now - lastBatMs >= 2000 || lastBatMs == 0) {
+  if (otaState != OTA_RECEIVING && (now - lastBatMs >= 2000 || lastBatMs == 0)) {
     lastBatMs = now;
     uint32_t mv = 0;
     for (int i = 0; i < 32; i++) mv += analogReadMilliVolts(BAT_PIN);
@@ -1325,7 +1337,9 @@ void loop() {
   }
 
   // an update that stopped sending data: cancel it, the old image stays
-  if (otaState == OTA_RECEIVING && now - otaLastMs > OTA_STALL_MS) {
+  // (otaLastMs is set by the Bluetooth task: compare with a fresh clock, as
+  // a stamp taken after `now` made this fire at random points before 1.3.1)
+  if (otaState == OTA_RECEIVING && sinceMs(otaLastMs) > OTA_STALL_MS) {
     otaFail(5);
   }
 

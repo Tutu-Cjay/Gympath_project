@@ -93,9 +93,10 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
         _progress = 0;
       });
       final image = await _fw.download(m);
-      // A transfer that breaks off (radio hiccup, link drop) leaves the old
-      // firmware running; start it again, reconnecting first if needed.
-      const attempts = 3;
+      // A transfer that breaks off (radio hiccup, link drop, or the stall
+      // check of firmware before 1.3.1 firing at a random point) leaves the
+      // old firmware running; start again, reconnecting first if needed.
+      const attempts = 6;
       for (_attempt = 0;; _attempt++) {
         if (!mounted) return;
         setState(() {
@@ -214,7 +215,7 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
           children: [
             Text(
                 _attempt > 0
-                    ? 'Connection dropped, trying again (${_attempt + 1}/3)… '
+                    ? 'Interrupted, trying again (${_attempt + 1}/6)… '
                         '${(_progress * 100).toStringAsFixed(0)}%'
                     : 'Installing… ${(_progress * 100).toStringAsFixed(0)}%',
                 style: const TextStyle(
