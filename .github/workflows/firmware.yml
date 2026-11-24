@@ -15,6 +15,8 @@ on:
       - firmware/Gympath_Track/**
       - firmware/tft_setup/**
       - .github/workflows/firmware.yml
+      - tools/check_tracker_layout.py
+      - tools/make_tracker_fonts.py
 
 permissions:
   contents: write   # publishes the firmware release
@@ -55,6 +57,9 @@ jobs:
           grep -n "ROLLBACK" $core/tools/sdk/esp32s3/sdkconfig || true
           grep -n "^esp32s3.menu.PartitionScheme.default\|^esp32s3.build.partitions\|^esp32s3.build.flash_size\|^esp32s3.upload.maximum_size" $core/boards.txt | head
           cat $core/tools/partitions/default.csv
+
+      - name: Check the screen layout (no overlaps)
+        run: python3 tools/check_tracker_layout.py
 
       - name: Compile
         run: |
