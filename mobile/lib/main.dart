@@ -5,6 +5,7 @@ import 'theme/app_theme.dart';
 import 'services/api_service.dart';
 import 'services/avatar_store.dart';
 import 'services/device_day_sync.dart';
+import 'services/firmware_auto_check.dart';
 import 'services/routine_store.dart';
 import 'services/workout_store.dart';
 import 'screens/connect_device_screen.dart';
@@ -18,6 +19,7 @@ Future<void> main() async {
   await RoutineStore.instance.load();
   await ApiService.instance.load();
   DeviceDaySync.instance.start();
+  FirmwareAutoCheck.instance.start();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -36,6 +38,7 @@ class GympathApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Gympath',
+      navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       builder: (context, child) {

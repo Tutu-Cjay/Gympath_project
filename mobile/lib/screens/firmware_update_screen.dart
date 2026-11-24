@@ -10,7 +10,14 @@ enum _Phase { idle, checking, ready, upToDate, downloading, flashing, done, erro
 /// Check the published firmware (GitHub release) for a newer tracker
 /// version and install it over BLE.
 class FirmwareUpdateScreen extends StatefulWidget {
-  const FirmwareUpdateScreen({super.key});
+  /// Install as soon as a newer version is confirmed (the user already said
+  /// yes in the update pop-up), and finish without further taps.
+  final bool autoInstall;
+
+  const FirmwareUpdateScreen({super.key, this.autoInstall = false});
+
+  /// True while the screen is up (the pop-up does not ask then).
+  static bool isOpen = false;
 
   @override
   State<FirmwareUpdateScreen> createState() => _FirmwareUpdateScreenState();
@@ -34,7 +41,14 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
   @override
   void initState() {
     super.initState();
+    FirmwareUpdateScreen.isOpen = true;
     WidgetsBinding.instance.addPostFrameCallback((_) => _check());
+  }
+
+  @override
+  void dispose() {
+    FirmwareUpdateScreen.isOpen = false;
+    super.dispose();
   }
 
   Future<void> _check() async {
@@ -56,7 +70,9 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
       _latest = await _fw.fetchManifest();
       final newer = _deviceVersion == null ||
           FirmwareUpdateService.isNewer(_latest!.version, _deviceVersion!);
+      if (!mounted) return;
       setState(() => _phase = newer ? _Phase.ready : _Phase.upToDate);
+      if (newer && widget.autoInstall) await _install();
     } catch (e) {
       _fail(e);
     }
@@ -71,10 +87,12 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
         _progress = 0;
       });
       final image = await _fw.download(m);
+      if (!mounted) return;
       setState(() => _phase = _Phase.flashing);
       await _fw.flash(image, onProgress: (p) {
         if (mounted) setState(() => _progress = p);
       });
+      if (!mounted) return;
       setState(() => _phase = _Phase.done);
     } catch (e) {
       _fail(e);
