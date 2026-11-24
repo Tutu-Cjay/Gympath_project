@@ -1,19 +1,19 @@
-"""Anti-aliased fonts for the tracker screen (TFT_eSPI smooth fonts).
+"""Subpixel-rendered fonts for the tracker screen.
 
-Renders Roboto (OFL, mobile/assets/fonts) into TFT_eSPI's .vlw format and
-writes them as C arrays, loaded with tft.loadFont(array):
+Renders Roboto (OFL, mobile/assets/fonts) with three coverage values per
+pixel, one for each of its left / middle / right subpixel stripes, the way
+ClearType does on desktop LCDs: the glyph is rasterised at 3x, averaged
+vertically, filtered horizontally ([1 2 3 2 1]/9, which keeps colour
+fringes down) and gamma-corrected for the black background. The firmware
+maps the three values to R, G and B by the panel's stripe order
+(SUBPIXEL_ORDER in Gympath_Track.ino), or averages them for plain
+greyscale anti-aliasing.
 
     python tools/make_tracker_fonts.py
 
 -> firmware/Gympath_Track/tracker_fonts.h
-
-VLW layout (big endian int32): header [glyph count, version, size, 0,
-ascent, descent], then per glyph [unicode, height, width, xAdvance, dY
-(baseline to bitmap top), dX, 0], then each glyph's 8-bit alpha bitmap,
-then the font name strings and an anti-aliased flag.
 """
 import os
-import struct
 import sys
 
 from PIL import Image, ImageDraw, ImageFont
@@ -22,63 +22,91 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONT_DIR = os.path.join(ROOT, "mobile", "assets", "fonts")
 OUT = os.path.join(ROOT, "firmware", "Gympath_Track", "tracker_fonts.h")
 
-ASCII = "".join(chr(c) for c in range(0x21, 0x7F))   # space is built in
+ASCII = "".join(chr(c) for c in range(0x20, 0x7F))
 # name, ttf, pixel size, characters, what it is used for
 FONTS = [
-    ("FONT_TINY", "Roboto-Medium.ttf", 13, ASCII, "dashboard footer"),
-    ("FONT_SMALL", "Roboto-Medium.ttf", 16, ASCII, "labels, battery, clock"),
+    ("FONT_TINY", "Roboto-Medium.ttf", 13, ASCII, "dashboard footer, battery"),
+    ("FONT_SMALL", "Roboto-Medium.ttf", 16, ASCII, "labels, clock"),
     ("FONT_MED", "Roboto-Bold.ttf", 28, ASCII, "status words: READY, HOLD, UPDATE"),
-    ("FONT_BIG", "Roboto-Bold.ttf", 56, "0123456789", "today's reps"),
+    ("FONT_BIG", "Roboto-Bold.ttf", 56, " 0123456789", "today's reps"),
 ]
 
-
-# The panel blends glyph edges straight in sRGB (RGB565), which makes light
-# text on the black screen look thin and its edges stepped. All text sits on
-# black, so the coverage is pre-corrected here: alpha^(1/2.2) is what
-# blending in linear light would give on a black background.
+# Coverage → value sent, for light text on black: blending in linear light.
 GAMMA = [round(255 * (i / 255) ** (1 / 2.2)) for i in range(256)]
+FIR = [1, 2, 3, 2, 1]          # sums to 9
 
 
-def vlw(ttf, size, chars):
-    font = ImageFont.truetype(os.path.join(FONT_DIR, ttf), size)
-    glyphs = []
+def glyph(font3, ch):
+    """(w, h, dx, dy, adv, bytes): bytes = h rows of w pixels × 3 stripes."""
+    adv = int(round(font3.getlength(ch) / 3))
+    if ch == " ":
+        return 0, 0, 0, 0, adv, b""
+    x0, y0, x1, y1 = font3.getbbox(ch, anchor="ls")       # 3x units, baseline origin
+    px0 = (x0 // 3) - 1                                     # 1 px margin each side
+    px1 = -(-x1 // 3) + 1                                   # for the filter spread
+    py0 = y0 // 3
+    py1 = -(-y1 // 3)
+    w, h = px1 - px0, py1 - py0
+    W3, H3 = w * 3, h * 3
+    img = Image.new("L", (W3, H3), 0)
+    ImageDraw.Draw(img).text((-px0 * 3, -py0 * 3), ch, font=font3, fill=255, anchor="ls")
+    cov = img.load()
+    out = bytearray()
+    for j in range(h):
+        row = [sum(cov[x, 3 * j + k] for k in range(3)) / 3 for x in range(W3)]
+        filt = []
+        for x in range(W3):
+            acc = 0
+            for t, c in enumerate(FIR):
+                xx = x + t - 2
+                if 0 <= xx < W3:
+                    acc += c * row[xx]
+            filt.append(acc / 9)
+        for i in range(w):
+            for k in range(3):
+                out.append(GAMMA[min(255, int(round(filt[3 * i + k])))])
+    return w, h, px0, -py0, adv, bytes(out)
+
+
+def build(name, ttf, size, chars):
+    font3 = ImageFont.truetype(os.path.join(FONT_DIR, ttf), size * 3)
+    gl, data = [], bytearray()
     for ch in chars:
-        x0, y0, x1, y1 = font.getbbox(ch, anchor="ls")   # origin at the baseline
-        w, h = max(x1 - x0, 0), max(y1 - y0, 0)
-        img = Image.new("L", (max(w, 1), max(h, 1)), 0)
-        ImageDraw.Draw(img).text((-x0, -y0), ch, font=font, fill=255, anchor="ls")
-        bmp = img.point(GAMMA).tobytes() if w and h else b""
-        adv = int(round(font.getlength(ch)))
-        glyphs.append((ord(ch), h, w, adv, -y0, x0, bmp))
-    ascent = max(g[4] for g in glyphs)
-    descent = max(g[1] - g[4] for g in glyphs)
-    out = bytearray(struct.pack(">6i", len(glyphs), 11, size, 0, ascent, descent))
-    for code, h, w, adv, dy, dx, _ in glyphs:
-        out += struct.pack(">7i", code, h, w, adv, dy, dx, 0)
-    for g in glyphs:
-        out += g[6]
-    name = os.path.splitext(ttf)[0].encode()
-    out += bytes([len(name)]) + name + b"\0" + bytes([len(name)]) + name + b"\0" + b"\1"
-    return bytes(out), ascent, descent
+        w, h, dx, dy, adv, b = glyph(font3, ch)
+        gl.append((ord(ch), w, h, dx, dy, adv, len(data)))
+        data += b
+    ink = [g for g in gl if g[1]]
+    asc = max(g[4] for g in ink)
+    desc = max(g[2] - g[4] for g in ink)
+    return gl, bytes(data), asc, desc
 
 
 def main():
     lines = [
         "// Generated by tools/make_tracker_fonts.py — do not edit.",
         "// Roboto (c) Google, SIL Open Font License 1.1 (mobile/assets/fonts/OFL.txt).",
+        "// Subpixel coverage: 3 bytes per pixel = left, middle, right stripe.",
         "#pragma once",
-        "#include <pgmspace.h>",
+        "#include <stdint.h>",
+        "",
+        "struct SPGlyph { uint16_t code; uint8_t w, h; int8_t dx, dy; uint8_t adv; uint32_t off; };",
+        "struct SPFont { const SPGlyph* glyphs; uint16_t count; const uint8_t* data; uint8_t asc, desc; };",
         "",
     ]
     total = 0
     for name, ttf, size, chars, use in FONTS:
-        data, asc, desc = vlw(ttf, size, chars)
-        total += len(data)
-        lines.append(f"// {use}: {ttf} {size}px, {len(chars)} glyphs, ascent {asc}, descent {desc}")
-        lines.append(f"const uint8_t {name}[{len(data)}] PROGMEM = {{")
+        gl, data, asc, desc = build(name, ttf, size, chars)
+        total += len(data) + 12 * len(gl)
+        lines.append(f"// {use}: {ttf} {size}px, {len(gl)} glyphs")
+        lines.append(f"static const uint8_t {name}_data[{len(data)}] = {{")
         for i in range(0, len(data), 24):
-            lines.append("  " + ",".join(f"0x{b:02X}" for b in data[i:i + 24]) + ",")
+            lines.append("  " + ",".join(str(b) for b in data[i:i + 24]) + ",")
         lines.append("};")
+        lines.append(f"static const SPGlyph {name}_glyphs[{len(gl)}] = {{")
+        for code, w, h, dx, dy, adv, off in gl:
+            lines.append(f"  {{{code},{w},{h},{dx},{dy},{adv},{off}}},")
+        lines.append("};")
+        lines.append(f"static const SPFont {name} = {{{name}_glyphs, {len(gl)}, {name}_data, {asc}, {desc}}};")
         lines.append("")
     with open(OUT, "w") as f:
         f.write("\n".join(lines))

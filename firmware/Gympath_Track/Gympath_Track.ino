@@ -24,6 +24,9 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.3.0: subpixel text rendering (like ClearType): glyph edges placed at a
+ * third of a pixel using the panel's B-G-R stripes, drawn in one block per
+ * text (no flicker).
  * 1.2.5: smoother text: glyph edges are gamma-corrected for the black
  * screen (the panel blends in sRGB, which made edges look thin and stepped).
  * 1.2.4: charging is shown by the battery's blocks filling up one after
@@ -60,14 +63,14 @@
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <Preferences.h>
-#include "tracker_fonts.h"   // anti-aliased Roboto (tools/make_tracker_fonts.py)
+#include "tracker_fonts.h"   // subpixel Roboto (tools/make_tracker_fonts.py)
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.2.5"     // bump on every release; the app compares it
+#define FW_VERSION   "1.3.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-9"
+#define FW_BUILD     "TRACK-1D-10"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -616,32 +619,88 @@ void update7Seg(int n, int cx, int cy, uint16_t c) {
   segColor = c;
 }
 
-// Anti-aliased text (smooth fonts blended onto the black background).
-const uint8_t* fontNow = nullptr;
-void useFont(const uint8_t* f) {
-  if (f == fontNow) return;          // loading parses the glyph table
-  tft.loadFont(f);
-  fontNow = f;
+// Text with subpixel anti-aliasing (tracker_fonts.h): each pixel carries a
+// coverage for its left, middle and right colour stripe, so glyph edges are
+// placed at a third of a pixel. The panel's stripes run, left to right:
+//   0 = R G B,  1 = B G R,  2 = no subpixels (plain greyscale smoothing)
+// TFT_eSPI drives the GC9A01 at rotation 0 with MADCTL BGR (colours only
+// come out right that way), i.e. the panel's stripes are B, G, R.
+#ifndef SUBPIXEL_ORDER
+#define SUBPIXEL_ORDER 1
+#endif
+
+const SPGlyph* findGlyph(const SPFont& f, char ch) {
+  for (uint16_t i = 0; i < f.count; i++)
+    if (f.glyphs[i].code == (uint8_t)ch) return &f.glyphs[i];
+  return nullptr;
 }
 
-void say(const uint8_t* f, const char* s, int x, int y, uint16_t fg) {
-  useFont(f);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(fg, TFT_BLACK, true);
-  tft.drawString(s, x, y);
+int textW(const SPFont& f, const char* s) {
+  int w = 0;
+  for (; *s; s++) { const SPGlyph* g = findGlyph(f, *s); if (g) w += g->adv; }
+  return w;
+}
+
+int textH(const SPFont& f) { return f.asc + f.desc; }
+
+// Draws `s` on black in one block write (no flicker): centred on cx
+// (centre = true) or starting at cx, vertically centred on cy. The block is
+// at least padW wide, so the old, longer text is overwritten too.
+void drawText(const SPFont& f, const char* s, int cx, int cy, uint16_t fg,
+              bool centre, int padW) {
+  int W = textW(f, s), H = textH(f);
+  int bw = max(W, padW);
+  if (bw <= 0 || H <= 0) return;
+  int x0 = centre ? cx - bw / 2 : cx, y0 = cy - H / 2;
+  uint16_t* buf = (uint16_t*)calloc(bw * H, sizeof(uint16_t));
+  if (!buf) return;
+  int r5 = fg >> 11, g6 = (fg >> 5) & 63, b5 = fg & 31;
+  int pen = centre ? (bw - W) / 2 : 0;
+  for (; *s; s++) {
+    const SPGlyph* g = findGlyph(f, *s);
+    if (!g) continue;
+    const uint8_t* d = f.data + g->off;
+    int gx = pen + g->dx, gy = f.asc - g->dy;
+    for (int j = 0; j < g->h; j++) {
+      int y = gy + j;
+      if (y < 0 || y >= H) { d += 3 * g->w; continue; }
+      for (int i = 0; i < g->w; i++, d += 3) {
+        int x = gx + i;
+        if (x < 0 || x >= bw || (d[0] | d[1] | d[2]) == 0) continue;
+#if SUBPIXEL_ORDER == 0
+        int aR = d[0], aG = d[1], aB = d[2];
+#elif SUBPIXEL_ORDER == 1
+        int aR = d[2], aG = d[1], aB = d[0];
+#else
+        int aR = (d[0] + d[1] + d[2]) / 3, aG = aR, aB = aR;
+#endif
+        uint16_t* p = &buf[y * bw + x];
+        // glyphs may touch: keep the brighter value per channel
+        int r = max((int)(*p >> 11), (r5 * aR + 127) / 255);
+        int gg = max((int)((*p >> 5) & 63), (g6 * aG + 127) / 255);
+        int b = max((int)(*p & 31), (b5 * aB + 127) / 255);
+        *p = (r << 11) | (gg << 5) | b;
+      }
+    }
+    pen += g->adv;
+  }
+  bool swap = tft.getSwapBytes();
+  tft.setSwapBytes(true);
+  tft.pushImage(x0, y0, bw, H, buf);
+  tft.setSwapBytes(swap);
+  free(buf);
+}
+
+void say(const SPFont& f, const char* s, int x, int y, uint16_t fg) {
+  drawText(f, s, x, y, fg, true, 0);
 }
 
 // Text at (x, y), middle-centre, replacing `shown` without clearing more
 // than the old text covered. Returns true when it drew.
 bool textDelta(char* shown, size_t cap, const char* now, int x, int y,
-               const uint8_t* f, uint16_t fg) {
+               const SPFont& f, uint16_t fg) {
   if (strcmp(shown, now) == 0) return false;
-  useFont(f);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(fg, TFT_BLACK, true);
-  tft.setTextPadding(shown[0] ? tft.textWidth(shown) : 0);
-  tft.drawString(now, x, y);
-  tft.setTextPadding(0);
+  drawText(f, now, x, y, fg, true, shown[0] ? textW(f, shown) : 0);
   strncpy(shown, now, cap - 1);
   shown[cap - 1] = 0;
   return true;
@@ -731,9 +790,8 @@ void drawBattery(int cy) {
   else if (pct < 0) snprintf(txt, sizeof txt, "--%%");
   else snprintf(txt, sizeof txt, "%d%%", pct);
   uint16_t c = batColor();
-  useFont(FONT_TINY);
   const int gap = 5;
-  int total = BAT_W + 2 + gap + tft.textWidth(txt);
+  int total = BAT_W + 2 + gap + textW(FONT_TINY, txt);
   int x = 120 - total / 2;
   if (batRight > batLeft) tft.fillRect(batLeft, cy - 8, batRight - batLeft, 17, TFT_BLACK);
   batLeft = x; batRight = x + total + 1;
@@ -742,9 +800,7 @@ void drawBattery(int cy) {
   tft.fillSmoothRoundRect(batX + BAT_W, batY + 4, 3, 5, 1, TFT_WHITE, TFT_BLACK);
   batLit = 0;                          // blocks drawn fresh below
   batLitColor = c;
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(c, TFT_BLACK, true);
-  tft.drawString(txt, x + BAT_W + 2 + gap, cy);
+  drawText(FONT_TINY, txt, x + BAT_W + 2 + gap, cy, c, false, 0);
 }
 
 // Blocks: repaint only those that switch (or all on a colour change).

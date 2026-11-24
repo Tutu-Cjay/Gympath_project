@@ -18,44 +18,52 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 H = os.path.join(ROOT, "firmware", "Gympath_Track", "tracker_fonts.h")
 
 
-class V:  # the .vlw reader
+class V:
+    """Reads the generated subpixel fonts (tracker_fonts.h)."""
+    ORDER = 1  # as SUBPIXEL_ORDER in the firmware: stripes B, G, R
+
     @staticmethod
     def load(header, name):
-        s=open(header).read()
-        m=re.search(r"const uint8_t %s\[\d+\] PROGMEM = \{(.*?)\};"%name, s, re.S)
-        data=bytes(int(x,16) for x in re.findall(r"0x([0-9A-F]{2})", m.group(1)))
-        n,_,size,_,asc,desc=struct.unpack(">6i",data[:24])
-        g={}; off=24+28*n; maxdesc=desc
-        for i in range(n):
-            code,h,w,adv,dy,dx,_=struct.unpack(">7i",data[24+28*i:24+28*i+28])
-            g[chr(code)]=(h,w,adv,dy,dx,data[off:off+w*h]); off+=w*h
-            if 0x20<code<0xA0: maxdesc=max(maxdesc,h-dy)
-        return dict(g=g,asc=asc,desc=maxdesc,H=asc+maxdesc,space=(asc+desc)*2//7)
+        s = open(header).read()
+        m = re.search(r"static const SPGlyph %s_glyphs\[\d+\] = \{(.*?)\};" % name, s, re.S)
+        glyphs = [tuple(map(int, t)) for t in re.findall(
+            r"\{(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+)\}", m.group(1))]
+        d = re.search(r"static const uint8_t %s_data\[\d+\] = \{(.*?)\};" % name, s, re.S)
+        data = bytes(int(x) for x in re.findall(r"\d+", d.group(1)))
+        asc, desc = map(int, re.search(
+            r"static const SPFont %s = \{.*?, (\d+), (\d+)\};" % name, s).groups())
+        g = {chr(c): (w, h, dx, dy, adv, off) for c, w, h, dx, dy, adv, off in glyphs}
+        return dict(g=g, data=data, asc=asc, desc=desc, H=asc + desc)
+
     @staticmethod
-    def width(f,s):
-        w=0
-        for ch in s:
-            if ch==' ': w+=f['space']; continue
-            w+=f['g'][ch][2]
-        return w
+    def width(f, s):
+        return sum(f["g"][ch][4] for ch in s if ch in f["g"])
+
     @staticmethod
-    def render(img,f,s,cx,cy,col,pad=0):
-        """MC_DATUM like TFT_eSPI; returns the box drawn (x0,y0,x1,y1)"""
-        W=V.width(f,s); H=f['H']; x=cx-W//2; y=cy-H//2
+    def render(img, f, s, cx, cy, col, pad=0, centre=True):
+        """Like the firmware's drawText (black background)."""
+        W = V.width(f, s); H = f["H"]; bw = max(W, pad)
+        x0 = cx - bw // 2 if centre else cx
+        pen = x0 + ((bw - W) // 2 if centre else 0)
+        y0 = cy - H // 2
         for ch in s:
-            if ch==' ': x+=f['space']; continue
-            h,w,adv,dy,dx,b=f['g'][ch]
-            top=y+f['asc']-dy
+            w, h, dx, dy, adv, off = f["g"][ch]
             for j in range(h):
                 for i in range(w):
-                    a=b[j*w+i]
-                    if a:
-                        px,py=x+dx+i,top+j
-                        if 0<=px<240 and 0<=py<240:
-                            r,g_,bb=img.getpixel((px,py)); img.putpixel((px,py),tuple(int(c*a/255+o*(255-a)/255) for c,o in zip(col,(r,g_,bb))))
-            x+=adv
-        bw=max(W,pad)
-        return (cx-bw//2, cy-H//2, cx-bw//2+bw, cy-H//2+H)
+                    a = f["data"][off + 3 * (j * w + i): off + 3 * (j * w + i) + 3]
+                    if not any(a):
+                        continue
+                    if V.ORDER == 0: aR, aG, aB = a[0], a[1], a[2]
+                    elif V.ORDER == 1: aR, aG, aB = a[2], a[1], a[0]
+                    else: aR = aG = aB = sum(a) // 3
+                    x, y = pen + dx + i, y0 + f["asc"] - dy + j
+                    if 0 <= x < 240 and 0 <= y < 240:
+                        o = img.getpixel((x, y))
+                        img.putpixel((x, y), (max(o[0], col[0] * aR // 255),
+                                              max(o[1], col[1] * aG // 255),
+                                              max(o[2], col[2] * aB // 255)))
+            pen += adv
+        return (x0, y0, x0 + bw, y0 + H)
 
 
 # ---- dashboard ----
@@ -143,7 +151,7 @@ def preview(path):
     d.rectangle([x + 25, 42, x + 26, 46], fill="white")
     for i in range(3):
         d.rectangle([x + 3 + i * 5, 41, x + 3 + i * 5 + 3, 47], fill=(0, 255, 136))
-    V.render(img, f, txt, x + 32 + V.width(f, txt) // 2, 44, (0, 255, 136))
+    V.render(img, f, txt, x + 32, 44, (0, 255, 136), centre=False)
     V.render(img, F["FONT_SMALL"], "Tue  10:30", 120, 66, (130, 130, 130))
     V.render(img, F["FONT_BIG"], "48", 120, 106, (255, 255, 255))
     V.render(img, F["FONT_SMALL"], "reps / 60", 120, 138, (0, 255, 136))
