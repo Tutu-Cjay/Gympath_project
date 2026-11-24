@@ -14,8 +14,13 @@ void main() {
   test('every theme × number style has its preview picture', () {
     for (final t in trackerThemes) {
       for (final d in trackerDigitStyles) {
-        final path = trackerPage(t.id, d.id);
-        expect(File(path).existsSync(), isTrue, reason: path);
+        for (final path in [
+          trackerPage(t.id, d.id),
+          'assets/tracker/count_${t.id}_${d.id}.png',
+          'assets/tracker/bg_${t.id}.png',
+        ]) {
+          expect(File(path).existsSync(), isTrue, reason: path);
+        }
       }
     }
   });

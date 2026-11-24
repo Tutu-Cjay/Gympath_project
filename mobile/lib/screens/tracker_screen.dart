@@ -94,8 +94,10 @@ class _TrackerScreenState extends State<TrackerScreen>
   void didChangeDependencies() {
     super.didChangeDependencies();
     for (var t = 0; t < trackerThemes.length; t++) {
+      precacheImage(AssetImage('assets/tracker/bg_$t.png'), context);
       for (var s = 0; s < trackerDigitStyles.length; s++) {
         precacheImage(AssetImage(trackerPage(t, s)), context);
+        precacheImage(AssetImage('assets/tracker/count_${t}_$s.png'), context);
       }
     }
   }
@@ -280,35 +282,36 @@ class _TrackerScreenState extends State<TrackerScreen>
             child: _statusCard(connected),
           ),
           const SizedBox(height: 20),
-          _heading('REP SCREEN', 'Swipe sideways'),
+          _heading('REP SCREEN', '←→ theme   ↑↓ numbers'),
           LayoutBuilder(builder: (context, box) {
             final arc = ThemeArc.layoutFor(box.maxWidth);
             _pageW = arc.step;
+            _pageH = arc.slot(ti);
+            // sideways turns the theme wheel, up / down the number wheel on
+            // its front face (each drag has its own direction, so the
+            // vertical one also wins over the page's scrolling)
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
               onHorizontalDragStart: (_) => _dragStart(themeAxis),
               onHorizontalDragUpdate: (d) => _dragUpdate(themeAxis, d.delta.dx),
               onHorizontalDragEnd: (d) =>
                   _dragEnd(themeAxis, d.velocity.pixelsPerSecond.dx),
-              child: ThemeArc(theme: _t, style: si, layout: arc),
-            );
-          }),
-          _caption(trackerThemes[ti].name, trackerThemes[ti].description, savedT == ti),
-          const SizedBox(height: 24),
-          _heading('NUMBERS', 'Swipe up or down'),
-          LayoutBuilder(builder: (context, box) {
-            final wheel = DigitsWheel.layoutFor(box.maxWidth);
-            _pageH = wheel.slot;
-            // a vertical drag of its own: it wins over the page's scrolling
-            return GestureDetector(
-              behavior: HitTestBehavior.opaque,
               onVerticalDragStart: (_) => _dragStart(digitsAxis),
               onVerticalDragUpdate: (d) => _dragUpdate(digitsAxis, d.delta.dy),
               onVerticalDragEnd: (d) =>
                   _dragEnd(digitsAxis, d.velocity.pixelsPerSecond.dy),
-              child: DigitsWheel(style: _s, saved: savedS, layout: wheel),
+              child: ThemeArc(theme: _t, style: _s, layout: arc),
             );
           }),
+          const SizedBox(height: 4),
+          Row(children: [
+            Expanded(
+                child: _caption(trackerThemes[ti].name,
+                    trackerThemes[ti].description, savedT == ti)),
+            Expanded(
+                child: _caption(trackerDigitStyles[si].name, 'Number style',
+                    savedS == si)),
+          ]),
           if (!connected)
             const Padding(
               padding: EdgeInsets.fromLTRB(20, 14, 20, 0),
@@ -346,7 +349,12 @@ class _TrackerScreenState extends State<TrackerScreen>
           ],
         ]),
         const SizedBox(height: 2),
-        Text(sub, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Text(sub,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+        ),
       ]);
 
   Widget _statusCard(bool connected) {
@@ -395,17 +403,26 @@ class _TrackerScreenState extends State<TrackerScreen>
 
 /// Sizes of the theme wheel for a given width.
 class ArcLayout {
-  final double width, face, step, radius, height;
-  const ArcLayout(this.width, this.face, this.step, this.radius, this.height);
+  final double width, face, step, radius, top, height;
+  const ArcLayout(this.width, this.face, this.step, this.radius, this.top, this.height);
+
+  /// Tracker px → screen px on the front face.
+  double get k => face / 240;
+
+  /// Spacing of the number wheel on theme [theme]'s front face, px.
+  double slot(int theme) => trackerCountWindows[theme][3] * k * 0.86;
 }
 
 /// The themes stand along a very large wheel and only its front is in
 /// view: the chosen theme faces you, its neighbours curve away at the
 /// sides (smaller, darker, turned), the rest are round the back, out of
 /// sight. The faces stand on a glossy floor and reflect in it.
+///
+/// On the front face, centred on the count, the number styles turn on a
+/// wheel of their own (up / down): the chosen one in place, one neighbour
+/// above and one below, smaller and faint, over the face.
 class ThemeArc extends StatelessWidget {
-  final double theme;
-  final int style;
+  final double theme, style;
   final ArcLayout layout;
   const ThemeArc({super.key, required this.theme, required this.style, required this.layout});
 
@@ -413,12 +430,17 @@ class ThemeArc extends StatelessWidget {
     final face = (width * 0.6).clamp(150.0, 260.0);
     final step = face * 0.74;          // front distance between neighbours
     final radius = width * 2.6;        // the wheel: far larger than the screen
-    return ArcLayout(width, face, step, radius, face * 1.30);
+    const top = 10.0;
+    return ArcLayout(width, face, step, radius, top, top + face * 1.30);
   }
 
   @override
   Widget build(BuildContext context) {
     final lo = layout;
+    final st = style.round().clamp(0, trackerDigitStyles.length - 1);
+    final front0 = theme.round().clamp(0, trackerThemes.length - 1);
+    // the number wheel shows while the theme wheel stands still
+    final still = (theme - front0).abs() < 1e-4;
     final items = <({double near, Widget w})>[];
     for (var i = 0; i < trackerThemes.length; i++) {
       final d = i - theme;                       // pages from the front
@@ -430,12 +452,13 @@ class ThemeArc extends StatelessWidget {
       final size = lo.face * scale;
       final dim = (d.abs() * 0.42).clamp(0.0, 0.85);
       final front = 1 - d.abs().clamp(0.0, 1.0);
-      final face = _face(i, size);
+      final whole = _face(trackerPage(i, st), size);
+      final face = still && i == front0 ? _face('assets/tracker/bg_$i.png', size) : whole;
       items.add((
         near: -d.abs(),
         w: Positioned(
           left: lo.width / 2 + x - size / 2,
-          top: (lo.face - size) / 2,
+          top: lo.top + (lo.face - size) / 2,
           width: size,
           child: Opacity(
             opacity: (1.0 - (d.abs() - 1.6).clamp(0.0, 0.7) / 0.7).clamp(0.0, 1.0),
@@ -447,7 +470,7 @@ class ThemeArc extends StatelessWidget {
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 _Shade(amount: dim, child: _rim(face, size, front)),
                 SizedBox(height: size * 0.05),
-                _Reflection(size: size, strength: 0.30 * (1 - dim), child: face),
+                _Reflection(size: size, strength: 0.30 * (1 - dim), child: whole),
               ]),
             ),
           ),
@@ -463,7 +486,7 @@ class ThemeArc extends StatelessWidget {
         Positioned(
           left: 0,
           right: 0,
-          top: lo.face * 0.99,
+          top: lo.top + lo.face * 0.99,
           height: lo.face * 0.32,
           child: const DecoratedBox(
             decoration: BoxDecoration(
@@ -476,16 +499,65 @@ class ThemeArc extends StatelessWidget {
           ),
         ),
         for (final it in items) it.w,
+        if (still) ..._numberWheel(front0),
       ]),
     );
   }
 
-  Widget _face(int th, double size) => SizedBox(
+  /// The number styles' wheel over the front face, centred on its count.
+  List<Widget> _numberWheel(int th) {
+    final lo = layout;
+    final k = lo.k;
+    final w = trackerCountWindows[th];
+    final ww = w[2] * k, wh = w[3] * k;
+    final left = lo.width / 2 - lo.face / 2 + w[0] * k;
+    final top = lo.top + w[1] * k;
+    final slot = lo.slot(th);
+    final items = <({double near, Widget w})>[];
+    for (var j = 0; j < trackerDigitStyles.length; j++) {
+      final d = j - style;                       // slots from the middle
+      if (d.abs() >= 1.6) continue;              // the near three only
+      final a = d * 0.7;                         // tilt on the wheel
+      final y = slot * math.sin(a) / math.sin(0.7); // ±1 slot at d = ±1
+      final scale = 1 - 0.42 * d.abs().clamp(0.0, 1.0);
+      final opacity = d.abs() <= 1
+          ? 1 - 0.66 * d.abs()
+          : 0.34 * (1.6 - d.abs()) / 0.6;        // the next one fades in
+      items.add((
+        near: -d.abs(),
+        w: Positioned(
+          left: left,
+          top: top + y,
+          width: ww,
+          height: wh,
+          child: IgnorePointer(
+            child: Opacity(
+              opacity: opacity.clamp(0.0, 1.0),
+              child: Transform(
+                alignment: Alignment.center,
+                transform: Matrix4.identity()
+                  ..setEntry(3, 2, 0.003)
+                  ..rotateX(a)
+                  ..scale(scale, scale),
+                child: Image.asset('assets/tracker/count_${th}_$j.png',
+                    width: ww, height: wh, fit: BoxFit.fill,
+                    gaplessPlayback: true, filterQuality: FilterQuality.medium),
+              ),
+            ),
+          ),
+        ),
+      ));
+    }
+    items.sort((a, b) => a.near.compareTo(b.near));
+    return [for (final it in items) it.w];
+  }
+
+  Widget _face(String image, double size) => SizedBox(
         width: size,
         height: size,
         child: ColoredBox(
           color: Colors.black,
-          child: Image.asset(trackerPage(th, style),
+          child: Image.asset(image,
               width: size, height: size, fit: BoxFit.fill,
               gaplessPlayback: true, filterQuality: FilterQuality.medium),
         ),
@@ -505,149 +577,6 @@ class ThemeArc extends StatelessWidget {
         ),
         child: ClipOval(child: face),
       );
-}
-
-// ======================= number wheel =======================
-
-/// Sizes of the number wheel for a given width.
-class DigitsLayout {
-  final double width, slot, itemW, itemH;
-  const DigitsLayout(this.width, this.slot, this.itemW, this.itemH);
-  double get height => slot * 3; // the one above, the chosen one, the one below
-}
-
-/// The number styles on a wheel turning up and down: the chosen style in
-/// the middle and exactly one neighbour above and one below, each whole,
-/// tilting away; anything further round the wheel is out of sight.
-class DigitsWheel extends StatelessWidget {
-  final double style;
-  final int? saved;
-  final DigitsLayout layout;
-  const DigitsWheel({super.key, required this.style, required this.saved, required this.layout});
-
-  /// The count as Minimal draws it: large, white, nothing else in its
-  /// window (theme 3's count window).
-  static const int _theme = 3;
-
-  static DigitsLayout layoutFor(double width) {
-    final slot = (width * 0.25).clamp(70.0, 104.0);
-    final itemH = slot * 0.9;
-    final w = trackerCountWindows[_theme];
-    return DigitsLayout(width, slot, itemH * w[2] / w[3], itemH);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final lo = layout;
-    final items = <({double near, Widget w})>[];
-    for (var j = 0; j < trackerDigitStyles.length; j++) {
-      final d = j - style;                      // slots from the middle
-      if (d.abs() >= 1.5) continue;             // only the near three
-      final a = d * 0.62;                       // tilt on the wheel
-      final y = lo.slot * math.sin(a) / math.sin(0.62); // ±1 slot at d = ±1
-      final scale = 1 - 0.16 * d.abs().clamp(0.0, 1.0);
-      final fade = d.abs() <= 1 ? 1.0 : (1.5 - d.abs()) / 0.5; // the next one fades in
-      final chosen = 1 - d.abs().clamp(0.0, 1.0);
-      items.add((
-        near: -d.abs(),
-        w: Positioned(
-          left: 0,
-          right: 0,
-          top: lo.slot + y,
-          height: lo.slot,
-          child: Opacity(
-            opacity: fade.clamp(0.0, 1.0),
-            child: Transform(
-              alignment: Alignment.center,
-              transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.0025)
-                ..rotateX(a)
-                ..scale(scale, scale),
-              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                SizedBox(width: 92, child: _name(j, chosen)),
-                const SizedBox(width: 12),
-                _Shade(amount: (d.abs() * 0.55).clamp(0.0, 0.8), child: _count(j, chosen)),
-                const SizedBox(width: 104),
-              ]),
-            ),
-          ),
-        ),
-      ));
-    }
-    items.sort((a, b) => a.near.compareTo(b.near));
-    return SizedBox(
-      width: lo.width,
-      height: lo.height,
-      child: Stack(clipBehavior: Clip.hardEdge, children: [
-        // the middle slot: where the chosen style sits
-        Positioned(
-          left: 20,
-          right: 20,
-          top: lo.slot,
-          height: lo.slot,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: AppTheme.cardBg,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: AppTheme.cardBgLight),
-            ),
-          ),
-        ),
-        for (final it in items) it.w,
-      ]),
-    );
-  }
-
-  Widget _name(int j, double chosen) => Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          if (saved == j)
-            const Padding(
-              padding: EdgeInsets.only(right: 4),
-              child: Icon(Icons.check_rounded, color: AppTheme.neonGreen, size: 14),
-            ),
-          Flexible(
-            child: Text(trackerDigitStyles[j].name,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    color: Color.lerp(AppTheme.textMuted, AppTheme.textPrimary, chosen),
-                    fontSize: 13,
-                    fontWeight: chosen > 0.5 ? FontWeight.w700 : FontWeight.w500)),
-          ),
-        ],
-      );
-
-  /// The count in style [j], cut from the tracker screen.
-  Widget _count(int j, double chosen) {
-    final lo = layout;
-    final w = trackerCountWindows[_theme];
-    final k = lo.itemH / w[3]; // px per tracker pixel
-    final full = 240 * k;
-    return Container(
-      width: lo.itemW,
-      height: lo.itemH,
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-            color: Color.lerp(const Color(0xFF2A2A2A), AppTheme.neonGreen, chosen * 0.8)!),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: OverflowBox(
-        alignment: Alignment.topLeft,
-        minWidth: full,
-        maxWidth: full,
-        minHeight: full,
-        maxHeight: full,
-        child: Transform.translate(
-          offset: Offset(-w[0] * k, -w[1] * k),
-          child: Image.asset(trackerPage(_theme, j),
-              width: full, height: full, fit: BoxFit.fill,
-              gaplessPlayback: true, filterQuality: FilterQuality.medium),
-        ),
-      ),
-    );
-  }
 }
 
 /// Darkens what has turned away.
