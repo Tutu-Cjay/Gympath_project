@@ -24,6 +24,10 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.2.1: charging is detected and shown (CHG and a bolt on the battery):
+ * a computer on USB, a charger plugged in or out (the voltage step), or a
+ * voltage that keeps rising or sits at 4.2 V; the percentage while charging
+ * is corrected for the charge current. The app gets it with the battery.
  * 1.2.0: when no set is running the screen shows today at a glance: reps
  * against the daily goal and muscles worked as rings, sets, weight lifted,
  * this week's training days and week streak, the clock, and the battery
@@ -46,12 +50,13 @@
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <Preferences.h>
+#include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.2.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.2.1"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-4"
+#define FW_BUILD     "TRACK-1D-5"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -242,8 +247,63 @@ const int      BAT_PIN = 1;
 float          vbat = 0;                // smoothed, V
 volatile int   batPct = -1;             // −1 = not measured yet
 volatile bool  batPresent = true;       // false: no cell, running from USB
-volatile bool  batCharging = false;     // at the charger's top voltage
+volatile bool  batCharging = false;     // charger plugged in (see chargeStep)
+volatile bool  usbHost = false;         // a computer is on the USB port
 uint32_t       lastBatMs = 0;
+
+// The board has no charger-status or VBUS pin (the ETA6096 STAT only drives
+// its LED), so charging is inferred:
+//  - a computer on USB is seen by its 1 kHz start-of-frame counter;
+//  - plugging a charger in lifts the cell voltage by the charge current
+//    through its internal resistance (tens of mV within seconds), unplugging
+//    drops it again;
+//  - while charging the voltage keeps climbing, or sits at the charger's
+//    4.2 V limit, which a resting cell does not exceed.
+const float CHG_STEP_V   = 0.040f;  // jump within ~10 s = plugged / unplugged
+const float CHG_RISE_V   = 0.015f;  // rise over 5 min = charging
+const float CHG_FALL_V   = 0.010f;  // fall over 5 min = not charging
+const float CHG_TOP_V    = 4.19f;   // at/above: on the charger
+float    vRecent[6] = {0};          // last 6 raw readings (2 s apart)
+float    vHist[10]  = {0};          // one reading per 30 s (5 min)
+int      vRecentN = 0, vHistN = 0;
+uint32_t lastHistMs = 0, lastSof = 0;
+
+bool usbHostSeen() {
+  uint32_t sof = REG_GET_FIELD(USB_SERIAL_JTAG_FRAM_NUM_REG, USB_SERIAL_JTAG_SOF_FRAME_INDEX);
+  bool moving = sof != lastSof;   // read 2 s apart: a host sends 2000 frames
+  lastSof = sof;
+  return moving;
+}
+
+void chargeStep(float v, uint32_t now) {
+  usbHost = usbHostSeen();
+  bool charging = batCharging;
+  // sudden step: newest two readings against the oldest two (~10 s apart),
+  // pairs averaged so ADC noise does not look like a step
+  for (int i = 0; i < 5; i++) vRecent[i] = vRecent[i + 1];
+  vRecent[5] = v;
+  if (vRecentN < 6) vRecentN++;
+  if (vRecentN == 6) {
+    float d = (vRecent[4] + vRecent[5] - vRecent[0] - vRecent[1]) / 2;
+    if (d >= CHG_STEP_V) { charging = true; vRecentN = 0; }        // count once
+    else if (d <= -CHG_STEP_V) { charging = false; vRecentN = 0; }
+  }
+  // slow trend over five minutes
+  if (now - lastHistMs >= 30000 || lastHistMs == 0) {
+    lastHistMs = now;
+    for (int i = 0; i < 9; i++) vHist[i] = vHist[i + 1];
+    vHist[9] = vbat;
+    if (vHistN < 10) vHistN++;
+    if (vHistN == 10) {
+      float d = vHist[9] - vHist[0];
+      if (d >= CHG_RISE_V) charging = true;
+      else if (d <= -CHG_FALL_V) charging = false;
+    }
+  }
+  if (vbat >= CHG_TOP_V) charging = true;
+  if (usbHost) charging = true;
+  batCharging = batPresent && charging;
+}
 
 uint32_t localNow() {
   return day.localEpoch + (millis() - dayRxMs) / 1000;
@@ -533,17 +593,21 @@ void drawBattery(int cx, int cy) {
   char txt[8];
   if (!batPresent) snprintf(txt, sizeof txt, "USB");
   else if (pct < 0) snprintf(txt, sizeof txt, "--%%");
+  else if (batCharging) snprintf(txt, sizeof txt, "%d%% CHG", pct);
   else snprintf(txt, sizeof txt, "%d%%", pct);
   uint16_t c = !batPresent || pct < 0 ? COL_MUTED
+             : batCharging ? COL_GREEN
              : pct > 50 ? COL_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
   int w = 22, h = 11;
   int x = cx - 30, y = cy - h / 2;
   tft.drawRoundRect(x, y, w, h, 2, TFT_WHITE);
   tft.fillRect(x + w, y + 3, 2, 5, TFT_WHITE);
   if (batPresent && pct > 0) tft.fillRect(x + 2, y + 2, (w - 4) * pct / 100, h - 4, c);
-  if (batCharging) {   // little bolt
-    tft.fillTriangle(x + 12, y + 1, x + 7, y + 6, x + 11, y + 6, TFT_WHITE);
-    tft.fillTriangle(x + 10, y + 5, x + 14, y + 5, x + 9, y + 10, TFT_WHITE);
+  if (batCharging) {   // bolt, outlined so it reads over the fill
+    tft.fillTriangle(x + 12, y + 1, x + 6, y + 6, x + 11, y + 6, TFT_BLACK);
+    tft.fillTriangle(x + 10, y + 5, x + 15, y + 5, x + 9, y + 10, TFT_BLACK);
+    tft.fillTriangle(x + 12, y + 2, x + 7, y + 6, x + 11, y + 6, TFT_YELLOW);
+    tft.fillTriangle(x + 10, y + 5, x + 14, y + 5, x + 9, y + 9, TFT_YELLOW);
   }
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(c, TFT_BLACK);
@@ -888,8 +952,8 @@ void setupBLE() {
   verChar->setValue(FW_VERSION);
   batChar    = s->createCharacteristic(BAT_CHAR_UUID,
                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  uint8_t unknown = 0xFF;      // 255 until the first reading
-  batChar->setValue(&unknown, 1);
+  uint8_t unknown[2] = {0xFF, 0};   // 255 until the first reading
+  batChar->setValue(unknown, 2);
   dayChar    = s->createCharacteristic(DAY_CHAR_UUID,
                  NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   dayChar->setCallbacks(new DayCallbacks());
@@ -1029,17 +1093,20 @@ void loop() {
   if (now - lastBatMs >= 2000 || lastBatMs == 0) {
     lastBatMs = now;
     uint32_t mv = 0;
-    for (int i = 0; i < 8; i++) mv += analogReadMilliVolts(BAT_PIN);
-    float v = mv / 8.0f * 3.0f / 1000.0f;        // 200k/100k divider
+    for (int i = 0; i < 32; i++) mv += analogReadMilliVolts(BAT_PIN);
+    float v = mv / 32.0f * 3.0f / 1000.0f;       // 200k/100k divider
     vbat = vbat == 0 ? v : vbat + 0.2f * (v - vbat);
     batPresent  = vbat > 2.5f;
-    batCharging = vbat > 4.22f;
-    int pct = batPresent ? batteryPercent(vbat) : -1;
-    if (pct != batPct) {
+    bool wasCharging = batCharging;
+    chargeStep(v, now);
+    // the charge current lifts the reading: estimate the resting voltage
+    int pct = batPresent ? batteryPercent(batCharging ? vbat - 0.06f : vbat) : -1;
+    if (pct != batPct || batCharging != wasCharging) {
       batPct = pct;
-      if (batChar) {
-        uint8_t b = pct < 0 ? 0xFF : (uint8_t)pct;
-        batChar->setValue(&b, 1);
+      if (batChar) {   // [percent (255 = unknown), flags: bit0 charging, bit1 USB host]
+        uint8_t b[2] = {(uint8_t)(pct < 0 ? 0xFF : pct),
+                        (uint8_t)((batCharging ? 1 : 0) | (usbHost ? 2 : 0))};
+        batChar->setValue(b, 2);
         if (bleServer && bleServer->getConnectedCount() > 0) batChar->notify();
       }
     }

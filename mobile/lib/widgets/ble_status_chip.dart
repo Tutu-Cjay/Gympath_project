@@ -71,6 +71,7 @@ class BleStatusChip extends StatelessWidget {
                   builder: (context, pkts, _) => Text(
                     state == BleConnectionState.connected && battery != null
                         ? '$label · $battery%'
+                            '${BleService.instance.batteryCharging.value ? ' ⚡' : ''}'
                         : state == BleConnectionState.connected && pkts > 0
                             ? '$label · $pkts'
                             : label,

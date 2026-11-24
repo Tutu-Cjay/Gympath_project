@@ -70,7 +70,7 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 |----------|-------|
 | UUID | `12345678-1234-5678-1234-56789abcdef5` |
 | Properties | Read, Notify |
-| Data Format | 1 byte: uint8 (0-100, percentage); 255 = unknown / no battery (USB) |
+| Data Format | uint8 percent (0-100; 255 = unknown / no battery, USB only), then (1.2.1+) uint8 flags: bit0 charging, bit1 computer on USB |
 | Description | Battery level from GPIO1 (200k/100k divider), notified when it changes |
 
 #### 6. Device Name (Read)

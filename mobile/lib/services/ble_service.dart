@@ -69,6 +69,9 @@ class BleService {
   /// Tracker battery in percent (firmware 1.2+, …cdef5); null when unknown
   /// or running from USB without a battery.
   final ValueNotifier<int?> batteryPercent = ValueNotifier<int?>(null);
+
+  /// The tracker says it is charging (firmware 1.2.1+, second battery byte).
+  final ValueNotifier<bool> batteryCharging = ValueNotifier<bool>(false);
   static const String batteryUuid = '12345678-1234-5678-1234-56789abcdef5';
 
   /// Today's numbers for the tracker's idle screen (firmware 1.2+, …cdefc).
@@ -430,11 +433,15 @@ class BleService {
     final bat = find(batteryUuid);
     if (bat != null) {
       try {
-        batteryPercent.value = _batteryFrom(await bat.read());
+        void take(List<int> v) {
+          batteryPercent.value = _batteryFrom(v);
+          batteryCharging.value = v.length > 1 && (v[1] & 1) != 0;
+        }
+
+        take(await bat.read());
         await bat.setNotifyValue(true);
         _batterySub?.cancel();
-        _batterySub = bat.onValueReceived
-            .listen((v) => batteryPercent.value = _batteryFrom(v));
+        _batterySub = bat.onValueReceived.listen(take);
       } catch (_) {}
     }
     _dayChar = find(daySummaryUuid);
@@ -445,6 +452,7 @@ class BleService {
     _batterySub?.cancel();
     _batterySub = null;
     batteryPercent.value = null;
+    batteryCharging.value = false;
     _dayChar = null;
     daySummarySupported.value = false;
   }
