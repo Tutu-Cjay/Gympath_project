@@ -24,6 +24,8 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.2.5: smoother text: glyph edges are gamma-corrected for the black
+ * screen (the panel blends in sRGB, which made edges look thin and stepped).
  * 1.2.4: charging is shown by the battery's blocks filling up one after
  * another (no CHG text); the battery icon has 4 blocks.
  * 1.2.3: anti-aliased text (Roboto) and shapes; fixed overlaps: the battery
@@ -62,10 +64,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.2.4"     // bump on every release; the app compares it
+#define FW_VERSION   "1.2.5"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-8"
+#define FW_BUILD     "TRACK-1D-9"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 

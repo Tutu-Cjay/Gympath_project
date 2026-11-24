@@ -32,6 +32,13 @@ FONTS = [
 ]
 
 
+# The panel blends glyph edges straight in sRGB (RGB565), which makes light
+# text on the black screen look thin and its edges stepped. All text sits on
+# black, so the coverage is pre-corrected here: alpha^(1/2.2) is what
+# blending in linear light would give on a black background.
+GAMMA = [round(255 * (i / 255) ** (1 / 2.2)) for i in range(256)]
+
+
 def vlw(ttf, size, chars):
     font = ImageFont.truetype(os.path.join(FONT_DIR, ttf), size)
     glyphs = []
@@ -40,7 +47,7 @@ def vlw(ttf, size, chars):
         w, h = max(x1 - x0, 0), max(y1 - y0, 0)
         img = Image.new("L", (max(w, 1), max(h, 1)), 0)
         ImageDraw.Draw(img).text((-x0, -y0), ch, font=font, fill=255, anchor="ls")
-        bmp = img.tobytes() if w and h else b""
+        bmp = img.point(GAMMA).tobytes() if w and h else b""
         adv = int(round(font.getlength(ch)))
         glyphs.append((ord(ch), h, w, adv, -y0, x0, bmp))
     ascent = max(g[4] for g in glyphs)
