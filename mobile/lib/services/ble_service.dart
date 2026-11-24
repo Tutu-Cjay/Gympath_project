@@ -79,12 +79,18 @@ class BleService {
   final ValueNotifier<bool> daySummarySupported = ValueNotifier<bool>(false);
   BluetoothCharacteristic? _dayChar;
 
-  /// Tracker settings (firmware 1.5+, …cdefd): [1, rep screen theme].
+  /// Tracker settings (…cdefd): write [1, rep screen theme, number style]
+  /// (firmware 1.5 takes the theme only); reads back
+  /// [1, theme, theme count, number style, style count] (1.6+).
   static const String settingsUuid = '12345678-1234-5678-1234-56789abcdefd';
   BluetoothCharacteristic? _settingsChar;
 
   /// The tracker's rep screen theme; null when unknown or not supported.
   final ValueNotifier<int?> trackerTheme = ValueNotifier<int?>(null);
+
+  /// The rep count's number style (firmware 1.6+); null when unknown or not
+  /// supported.
+  final ValueNotifier<int?> trackerDigits = ValueNotifier<int?>(null);
   StreamSubscription<List<int>>? _batterySub;
 
   BluetoothDevice? _device;
@@ -456,20 +462,32 @@ class BleService {
     _settingsChar = find(settingsUuid);
     if (_settingsChar != null) {
       try {
-        final v = await _settingsChar!.read();
-        trackerTheme.value = v.length >= 2 && v[0] == 1 ? v[1] : null;
+        _takeSettings(await _settingsChar!.read());
       } catch (_) {}
     }
   }
 
-  /// Choose the tracker's rep screen theme (0 Classic … 3 Minimal).
-  Future<bool> setTrackerTheme(int theme) async {
+  void _takeSettings(List<int> v) {
+    final ok = v.length >= 2 && v[0] == 1;
+    trackerTheme.value = ok ? v[1] : null;
+    trackerDigits.value = ok && v.length >= 5 ? v[3] : null;
+  }
+
+  /// The settings packet the tracker takes.
+  static List<int> settingsPacket(int theme, int? digits) =>
+      [1, theme, if (digits != null) digits];
+
+  /// Choose the tracker's rep screen: [theme] (0 Classic … 3 Minimal) and,
+  /// on firmware 1.6+, the count's number style [digits] (0 Segment …
+  /// 3 Light). Leaves out what is not given.
+  Future<bool> setTrackerScreen({int? theme, int? digits}) async {
     final c = _settingsChar;
-    if (c == null) return false;
+    final t = theme ?? trackerTheme.value;
+    if (c == null || t == null) return false;
     try {
-      await c.write([1, theme], withoutResponse: false);
-      final v = await c.read();
-      trackerTheme.value = v.length >= 2 && v[0] == 1 ? v[1] : theme;
+      await c.write(settingsPacket(t, digits ?? trackerDigits.value),
+          withoutResponse: false);
+      _takeSettings(await c.read());
       return true;
     } catch (_) {
       return false;
@@ -485,6 +503,7 @@ class BleService {
     daySummarySupported.value = false;
     _settingsChar = null;
     trackerTheme.value = null;
+    trackerDigits.value = null;
   }
 
   /// Send today's numbers to the tracker's idle screen.

@@ -24,6 +24,9 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.6.0: number styles for the rep count, chosen in the app: Segment,
+ * Rounded segment, Bold and Light, on every theme. The count always sits
+ * centred whatever its number of digits (4 digits drop to a smaller size).
  * 1.5.0: four rep screen themes, chosen in the app: Classic (7-segment
  * count, speed ring), Stroke (the ring fills with each rep's travel),
  * Tempo (lift / lower phase and the last rep's up / down time), Minimal
@@ -84,10 +87,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.5.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.6.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-14"
+#define FW_BUILD     "TRACK-1D-15"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -675,58 +678,135 @@ const bool segMap[10][7] = {
   {0,1,1,0,0,1,1},{1,0,1,1,0,1,1},{1,0,1,1,1,1,1},{1,1,1,0,0,0,0},
   {1,1,1,1,1,1,1},{1,1,1,1,0,1,1}
 };
-const int SEG_S = 6;                         // segment thickness (px)
+// The rep count, in the user's number style (…cdefd byte 2):
+//   0 Segment          sharp 7-segment digits
+//   1 Rounded segment  7-segment digits with rounded, anti-aliased bars
+//   2 Bold             Roboto Bold
+//   3 Light            Roboto Regular
+// Always centred on its point whatever the number of digits; 4 digits drop
+// to the smaller size so they stay inside the ring.
+const uint8_t     NUM_STYLE_COUNT = 4;
+volatile uint8_t  numStyle = 0;
 
-void fillSegment(int k, int x, int y, int s, uint16_t c) {
+void segRect(int k, int x, int y, int s, int& rx, int& ry, int& rw, int& rh) {
   int w = 6 * s, h = s, vv = 7 * s;
   switch (k) {
-    case 0: tft.fillRect(x + h, y, w, h, c); break;
-    case 1: tft.fillRect(x + w + h, y + h, h, vv, c); break;
-    case 2: tft.fillRect(x + w + h, y + vv + 2*h, h, vv, c); break;
-    case 3: tft.fillRect(x + h, y + 2*vv + 2*h, w, h, c); break;
-    case 4: tft.fillRect(x, y + vv + 2*h, h, vv, c); break;
-    case 5: tft.fillRect(x, y + h, h, vv, c); break;
-    case 6: tft.fillRect(x + h, y + vv + h, w, h, c); break;
+    case 0: rx = x + h;     ry = y;              rw = w; rh = h;  break;
+    case 1: rx = x + w + h; ry = y + h;          rw = h; rh = vv; break;
+    case 2: rx = x + w + h; ry = y + vv + 2 * h; rw = h; rh = vv; break;
+    case 3: rx = x + h;     ry = y + 2 * vv + 2 * h; rw = w; rh = h; break;
+    case 4: rx = x;         ry = y + vv + 2 * h; rw = h; rh = vv; break;
+    case 5: rx = x;         ry = y + h;          rw = h; rh = vv; break;
+    default: rx = x + h;    ry = y + vv + h;     rw = w; rh = h;  break;
   }
 }
 
-// What the 7-segment number currently shows.
-char     segShown[8] = "";
-uint16_t segColor = 0;
+void fillSegment(int k, int x, int y, int s, uint16_t c, bool round) {
+  int rx, ry, rw, rh;
+  segRect(k, x, y, s, rx, ry, rw, rh);
+  if (c == TFT_BLACK) { tft.fillRect(rx, ry, rw, rh, c); return; }
+  if (round) {               // a hair of gap along the bar so ends stay round
+    if (k == 0 || k == 3 || k == 6) { rx += 1; rw -= 2; } else { ry += 1; rh -= 2; }
+  }
+  if (!round) tft.fillRect(rx, ry, rw, rh, c);
+  else tft.fillSmoothRoundRect(rx, ry, rw, rh, s / 2, c, TFT_BLACK);
+}
 
-void segBox(int len, int cx, int cy, int& x, int& y, int& w, int& h) {
-  int dw = 8 * SEG_S, sp = 2 * SEG_S;
+void segBox(int len, int s, int cx, int cy, int& x, int& y, int& w, int& h) {
+  int dw = 8 * s, sp = 2 * s;
   w = len * dw + (len - 1) * sp;
-  h = 17 * SEG_S;
+  h = 17 * s;
   x = cx - w / 2; y = cy - h / 2;
 }
 
-void update7Seg(int n, int cx, int cy, uint16_t c) {
+// What the count currently shows (reset when its screen is drawn fresh).
+struct CountView {
+  char shown[8];
+  uint16_t color;
+  int8_t s;                 // segment size, 0 = not segments
+  const SPFont* font;       // font, null = not text
+  int cx, cy;
+};
+CountView cv;
+void countReset() { memset(&cv, 0, sizeof cv); }
+
+// Draws (c) or erases (black) the lit segments of `str` at its box.
+void segDigits(const char* str, int s, int cx, int cy, uint16_t c, bool round) {
+  int x, y, w, h;
+  segBox(strlen(str), s, cx, cy, x, y, w, h);
+  for (; *str; str++, x += 10 * s)
+    for (int k = 0; k < 7; k++)
+      if (segMap[*str - '0'][k]) fillSegment(k, x, y, s, c, round);
+}
+
+// Remove whatever the count drew last (only its own pixels: the ring
+// around it stays).
+void countClear() {
+  if (!cv.shown[0]) return;
+  if (cv.s) {
+    segDigits(cv.shown, cv.s, cv.cx, cv.cy, TFT_BLACK, false);
+  } else if (cv.font) {
+    int w = textW(*cv.font, cv.shown), h = textH(*cv.font);
+    tft.fillRect(cv.cx - w / 2, cv.cy - h / 2, w, h, TFT_BLACK);
+  }
+  cv.shown[0] = 0;
+}
+
+// Centre on the ink, not on the digit cells: a 7-segment "1" lights only
+// its cell's right edge, and a font's "1" sits off-centre in its cell, so a
+// count starting or ending in 1 would otherwise look pushed aside.
+int segInkShift(const char* str, int s) {
+  return str[0] == '1' ? (7 * s) / 2 : 0;       // its ink starts 7s into the cell
+}
+int fontInkShift(const SPFont& f, const char* str) {
+  int len = strlen(str);
+  const SPGlyph* g0 = findGlyph(f, str[0]);
+  const SPGlyph* g1 = findGlyph(f, str[len - 1]);
+  if (!g0 || !g1) return 0;
+  int W = textW(f, str);
+  int inkL = g0->dx, inkR = W - g1->adv + g1->dx + g1->w;
+  return (inkL + inkR) / 2 - W / 2;
+}
+
+void drawCount(int n, int cx, int cy, bool large, uint16_t c) {
   char str[8];
   snprintf(str, sizeof str, "%d", n < 0 ? 0 : n);
-  int len = strlen(str), oldLen = strlen(segShown);
-  if (len != oldLen) {               // the digits move: clear the old ones
-    if (oldLen) {
+  int len = strlen(str);
+  bool many = len >= 4;
+  uint8_t style = numStyle;
+  if (style <= 1) {
+    int s = large ? (many ? 4 : 6) : (many ? 2 : 3);
+    int ecx = cx - segInkShift(str, s);
+    bool round = style == 1;
+    // a new size, digit count or position: erase and draw it whole
+    if (cv.font || cv.s != s || strlen(cv.shown) != (size_t)len || cv.cx != ecx || cv.cy != cy)
+      countClear();
+    if (!cv.shown[0]) {
+      segDigits(str, s, ecx, cy, c, round);
+    } else {                // same layout: switch only the segments that change
       int x, y, w, h;
-      segBox(oldLen, cx, cy, x, y, w, h);
-      tft.fillRect(x, y, w, h, TFT_BLACK);
+      segBox(len, s, ecx, cy, x, y, w, h);
+      for (int i = 0; i < len; i++, x += 10 * s) {
+        int nd = str[i] - '0', od = cv.shown[i] - '0';
+        for (int k = 0; k < 7; k++) {
+          bool on = segMap[nd][k], was = segMap[od][k];
+          if (on && (!was || c != cv.color)) fillSegment(k, x, y, s, c, round);
+          else if (!on && was) fillSegment(k, x, y, s, TFT_BLACK, round);
+        }
+      }
     }
-    segShown[0] = 0;
-    oldLen = 0;
+    cv.font = nullptr; cv.s = s; cv.cx = ecx; cv.cy = cy;
+  } else {
+    const SPFont* f = style == 2 ? (large && !many ? &NUM_BOLD_L : &FONT_BIG)
+                                 : (large && !many ? &NUM_LIGHT_L : &NUM_LIGHT_S);
+    int ecx = cx - fontInkShift(*f, str);
+    if (cv.s || cv.font != f || cv.cx != ecx || cv.cy != cy) countClear();
+    if (strcmp(cv.shown, str) != 0 || c != cv.color)
+      drawText(*f, str, ecx, cy, c, true, cv.shown[0] ? textW(*f, cv.shown) : 0);
+    cv.s = 0; cv.font = f; cv.cx = ecx; cv.cy = cy;
   }
-  int x, y, w, h;
-  segBox(len, cx, cy, x, y, w, h);
-  for (int i = 0; i < len; i++) {
-    int nd = str[i] - '0', od = oldLen ? segShown[i] - '0' : -1;
-    for (int k = 0; k < 7; k++) {
-      bool on = segMap[nd][k], was = od >= 0 && segMap[od][k];
-      if (on && (!was || c != segColor)) fillSegment(k, x, y, SEG_S, c);
-      else if (!on && was) fillSegment(k, x, y, SEG_S, TFT_BLACK);
-    }
-    x += 8 * SEG_S + 2 * SEG_S;
-  }
-  strcpy(segShown, str);
-  segColor = c;
+  strcpy(cv.shown, str);
+  cv.color = c;
 }
 
 // Text with subpixel anti-aliasing (tracker_fonts.h): each pixel carries a
@@ -770,20 +850,28 @@ void drawText(const SPFont& f, const char* s, int cx, int cy, uint16_t fg,
     const SPGlyph* g = findGlyph(f, *s);
     if (!g) continue;
     const uint8_t* d = f.data + g->off;
+    const int ch = f.ch;               // 3 = subpixel stripes, 1 = greyscale
     int gx = pen + g->dx, gy = f.asc - g->dy;
     for (int j = 0; j < g->h; j++) {
       int y = gy + j;
-      if (y < 0 || y >= H) { d += 3 * g->w; continue; }
-      for (int i = 0; i < g->w; i++, d += 3) {
+      if (y < 0 || y >= H) { d += ch * g->w; continue; }
+      for (int i = 0; i < g->w; i++, d += ch) {
         int x = gx + i;
-        if (x < 0 || x >= bw || (d[0] | d[1] | d[2]) == 0) continue;
+        int aR, aG, aB;
+        if (ch == 1) {
+          if (!d[0]) continue;
+          aR = aG = aB = d[0];
+        } else {
+          if ((d[0] | d[1] | d[2]) == 0) continue;
 #if SUBPIXEL_ORDER == 0
-        int aR = d[0], aG = d[1], aB = d[2];
+          aR = d[0]; aG = d[1]; aB = d[2];
 #elif SUBPIXEL_ORDER == 1
-        int aR = d[2], aG = d[1], aB = d[0];
+          aR = d[2]; aG = d[1]; aB = d[0];
 #else
-        int aR = (d[0] + d[1] + d[2]) / 3, aG = aR, aB = aR;
+          aR = aG = aB = (d[0] + d[1] + d[2]) / 3;
 #endif
+        }
+        if (x < 0 || x >= bw) continue;
         uint16_t* p = &buf[y * bw + x];
         // glyphs may touch: keep the brighter value per channel
         int r = max((int)(*p >> 11), (r5 * aR + 127) / 255);
@@ -1037,7 +1125,6 @@ void updateDashboard() {
 /* ================= REP SCREEN THEMES ================= */
 // What a theme last drew (reset when the screen is drawn fresh).
 struct RepView {
-  char     big[8];        // count
   char     word[12];      // Tempo: LIFT / LOWER / HOLD
   char     tempo[32];     // Tempo: last rep's times
   uint32_t ringEnd;       // Stroke: end angle of the fill
@@ -1069,9 +1156,7 @@ void themeFresh(uint8_t th) {
 }
 
 void themeStroke(int r) {
-  char line[8];
-  snprintf(line, sizeof line, "%d", r);
-  textDelta(rv.big, sizeof rv.big, line, 120, 112, FONT_BIG, TFT_WHITE);
+  drawCount(r, 120, 112, false, TFT_WHITE);
   uint32_t end = ringEnd(strokeFrac);
   end -= (end - RING_A0) % 2;                       // 2° steps
   uint16_t c = phaseColor(phase);
@@ -1094,9 +1179,8 @@ void themeTempo(int r) {
     rv.ringCol = c;
   }
   textDelta(rv.word, sizeof rv.word, ph > 0 ? "LIFT" : ph < 0 ? "LOWER" : "HOLD", 120, 62, FONT_MED, c);
+  drawCount(r, 120, 118, false, TFT_WHITE);
   char line[32];
-  snprintf(line, sizeof line, "%d", r);
-  textDelta(rv.big, sizeof rv.big, line, 120, 118, FONT_BIG, TFT_WHITE);
   if (tempoUpMs || tempoDownMs)
     snprintf(line, sizeof line, "up %.1fs  down %.1fs", tempoUpMs / 1000.0f, tempoDownMs / 1000.0f);
   else
@@ -1105,9 +1189,7 @@ void themeTempo(int r) {
 }
 
 void themeMinimal(int r) {
-  char line[8];
-  snprintf(line, sizeof line, "%d", r);
-  textDelta(rv.big, sizeof rv.big, line, 120, 120, FONT_BIG, TFT_WHITE);
+  drawCount(r, 120, 120, true, TFT_WHITE);
   int want = r > 30 ? 30 : r;                       // one dot per rep, 12° apart
   for (; rv.dots < want; rv.dots++) {
     float a = rv.dots * 12.0f * DEG_TO_RAD;
@@ -1207,7 +1289,7 @@ void displayTask(void*) {
     if (st != shownState || tm != shownTest || themeVersion != shownTheme ||
         (themed && r < lastReps)) {                 // count reset: start over
       tft.fillScreen(TFT_BLACK);
-      segShown[0] = 0;
+      countReset();
       shownTheme = themeVersion;
       if (st == ST_TRACK) themeFresh(repTheme);
       switch (st) {
@@ -1249,7 +1331,7 @@ void displayTask(void*) {
       ringColor = color;
     }
     // the rep count changes only the segments that switch
-    if (st == ST_TRACK) update7Seg(r, 120, 120, color);
+    if (st == ST_TRACK) drawCount(r, 120, 120, true, color);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -1345,12 +1427,13 @@ class DayCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
-// …cdefd: [1, theme] from the app; reads back [1, theme, theme count].
+// …cdefd: [1, theme, number style] from the app (style optional, older
+// apps send 2 bytes); reads back [1, theme, theme count, style, style count].
 NimBLECharacteristic* setChar = nullptr;
 void setValueOfSettings() {
   if (!setChar) return;
-  uint8_t b[3] = {1, repTheme, THEME_COUNT};
-  setChar->setValue(b, 3);
+  uint8_t b[5] = {1, repTheme, THEME_COUNT, numStyle, NUM_STYLE_COUNT};
+  setChar->setValue(b, 5);
 }
 class SettingsCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
@@ -1361,6 +1444,14 @@ class SettingsCallbacks : public NimBLECharacteristicCallbacks {
       repTheme = t;
       themeSavePending = true;
       themeVersion = themeVersion + 1;
+    }
+    if (val.length() >= 3) {
+      uint8_t n = val.data()[2];
+      if (n < NUM_STYLE_COUNT && n != numStyle) {
+        numStyle = n;
+        themeSavePending = true;
+        themeVersion = themeVersion + 1;
+      }
     }
     setValueOfSettings();
   }
@@ -1501,6 +1592,8 @@ void setup() {
   prefs.begin("gympath", false);
   repTheme = prefs.getUChar("theme", 0);
   if (repTheme >= THEME_COUNT) repTheme = 0;
+  numStyle = prefs.getUChar("num", 0);
+  if (numStyle >= NUM_STYLE_COUNT) numStyle = 0;
   DayPacket saved;
   if (prefs.getBytes("day", &saved, sizeof saved) == sizeof saved && saved.ver == 1) {
     day = saved;
@@ -1532,6 +1625,7 @@ void loop() {
   if (themeSavePending) {
     themeSavePending = false;
     prefs.putUChar("theme", repTheme);
+    prefs.putUChar("num", numStyle);
   }
   if (daySavePending) {
     daySavePending = false;

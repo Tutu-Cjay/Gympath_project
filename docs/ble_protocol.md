@@ -161,8 +161,8 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 |----------|-------|
 | UUID | `12345678-1234-5678-1234-56789abcdefd` |
 | Properties | Read, Write |
-| Data Format | write `[1, theme]`; read `[1, theme, theme count]` |
-| Description | Rep screen theme: 0 Classic, 1 Stroke, 2 Tempo, 3 Minimal. Kept in flash |
+| Data Format | write `[1, theme, number style]` (style optional; 1.5 takes `[1, theme]`); read `[1, theme, theme count, number style, style count]` (1.5 reads back only the first 3) |
+| Description | Rep screen theme: 0 Classic, 1 Stroke, 2 Tempo, 3 Minimal. Number style of the rep count (1.6+): 0 Segment, 1 Rounded segment, 2 Bold, 3 Light. The count is centred on its ink at any digit count. Both kept in flash |
 
 ## USB Test Mode (no Bluetooth — emulator testing)
 

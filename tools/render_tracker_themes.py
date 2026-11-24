@@ -5,6 +5,9 @@ colours; see themeFresh / themeStroke / themeTempo / themeMinimal and the
 Classic 7-segment screen in Gympath_Track.ino) mid-set:
 
     python tools/render_tracker_themes.py   -> mobile/assets/tracker/theme_<n>.png
+                                               mobile/assets/tracker/digits_<n>.png
+
+digits_<n>.png: the rep count in each number style (firmware drawCount).
 """
 import math
 import os
@@ -45,14 +48,44 @@ def finish(img, text_fn, path):
     out.save(path)
 
 
-def seven_seg(img, n, color):
+def seven_seg_round(n, color, s=6, cy=120, scale=4, cx=120):
+    """Rounded segments, anti-aliased (fillSmoothRoundRect): drawn large and
+    scaled down. Returns an RGBA layer."""
+    seg = [(1, 1, 1, 1, 1, 1, 0), (0, 1, 1, 0, 0, 0, 0), (1, 1, 0, 1, 1, 0, 1), (1, 1, 1, 1, 0, 0, 1),
+           (0, 1, 1, 0, 0, 1, 1), (1, 0, 1, 1, 0, 1, 1), (1, 0, 1, 1, 1, 1, 1), (1, 1, 1, 0, 0, 0, 0),
+           (1, 1, 1, 1, 1, 1, 1), (1, 1, 1, 1, 0, 1, 1)]
+    w, h, vv = 6 * s, s, 7 * s
+    txt = str(n); dw, sp = 8 * s, 2 * s
+    W = len(txt) * dw + (len(txt) - 1) * sp; H = 17 * s
+    x, y = cx - W // 2, cy - H // 2
+    big = Image.new("L", (240 * scale, 240 * scale), 0)
+    d = ImageDraw.Draw(big)
+    for ch in txt:
+        on = seg[int(ch)]
+        rects = [(x + h, y, w, h), (x + w + h, y + h, h, vv), (x + w + h, y + vv + 2 * h, h, vv),
+                 (x + h, y + 2 * vv + 2 * h, w, h), (x, y + vv + 2 * h, h, vv), (x, y + h, h, vv),
+                 (x + h, y + vv + h, w, h)]
+        for k, (rx, ry, rw, rh) in enumerate(rects):
+            if not on[k]:
+                continue
+            if k in (0, 3, 6): rx += 1; rw -= 2
+            else: ry += 1; rh -= 2
+            d.rounded_rectangle([rx * scale, ry * scale, (rx + rw) * scale - 1, (ry + rh) * scale - 1],
+                                radius=(s // 2) * scale, fill=255)
+        x += dw + sp
+    mask = big.resize((240, 240), Image.LANCZOS)
+    layer = Image.new("RGB", (240, 240), color)
+    return layer, mask
+
+
+def seven_seg(img, n, color, cx=120):
     seg = [(1, 1, 1, 1, 1, 1, 0), (0, 1, 1, 0, 0, 0, 0), (1, 1, 0, 1, 1, 0, 1), (1, 1, 1, 1, 0, 0, 1),
            (0, 1, 1, 0, 0, 1, 1), (1, 0, 1, 1, 0, 1, 1), (1, 0, 1, 1, 1, 1, 1), (1, 1, 1, 0, 0, 0, 0),
            (1, 1, 1, 1, 1, 1, 1), (1, 1, 1, 1, 0, 1, 1)]
     s = 6; w, h, vv = 6 * s, s, 7 * s
     txt = str(n); dw, sp = 8 * s, 2 * s
     W = len(txt) * dw + (len(txt) - 1) * sp; H = 17 * s
-    x, y = 120 - W // 2, 120 - H // 2
+    x, y = cx - W // 2, 120 - H // 2
     d = ImageDraw.Draw(img)
     for ch in txt:
         on = seg[int(ch)]
@@ -93,6 +126,22 @@ def main():
         d.ellipse([(x - 4) * S, (y - 4) * S, (x + 4) * S, (y + 4) * S], fill=GREEN)
     finish(img, lambda im: L.V.render(im, F["FONT_BIG"], "7", 120, 120, (255, 255, 255)),
            os.path.join(OUT, "theme_3.png"))
+    # number styles: the count "128" as Classic / Minimal show it
+    for i in range(4):
+        img = base().resize((240, 240))
+        kind, (what, cx), _ = L.count_layout(i, "128", True, 120)   # as drawCount centres it
+        if i == 0:
+            seven_seg(img, 128, (255, 255, 255), cx)
+        elif i == 1:
+            layer, mask = seven_seg_round(128, (255, 255, 255), cx=cx)
+            img.paste(layer, (0, 0), mask)
+        else:
+            L.V.render(img, F[what], "128", cx, 120, (255, 255, 255))
+        m = Image.new("L", (240, 240), 0)
+        ImageDraw.Draw(m).ellipse([0, 0, 239, 239], fill=255)
+        out = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+        out.paste(img, (0, 0), m)
+        out.save(os.path.join(OUT, f"digits_{i}.png"))
     print("wrote", OUT)
 
 

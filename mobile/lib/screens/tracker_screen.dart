@@ -14,6 +14,22 @@ class TrackerTheme {
   String get image => 'assets/tracker/theme_$id.png';
 }
 
+/// How the rep count's digits look (firmware 1.6+): the same on every theme.
+class TrackerDigits {
+  final int id; // value sent to the tracker
+  final String name;
+  const TrackerDigits(this.id, this.name);
+
+  String get image => 'assets/tracker/digits_$id.png';
+}
+
+const List<TrackerDigits> trackerDigitStyles = [
+  TrackerDigits(0, 'Segment'),
+  TrackerDigits(1, 'Rounded'),
+  TrackerDigits(2, 'Bold'),
+  TrackerDigits(3, 'Light'),
+];
+
 const List<TrackerTheme> trackerThemes = [
   TrackerTheme(0, 'Classic', 'Segment digits, ring coloured by speed'),
   TrackerTheme(1, 'Stroke', 'The ring fills with each rep\'s travel'),
@@ -32,7 +48,7 @@ class TrackerScreen extends StatefulWidget {
 class _TrackerScreenState extends State<TrackerScreen> {
   final _ble = BleService.instance;
   String? _version;
-  int? _saving;
+  String? _saving; // 't<id>' / 'd<id>' while it is being sent
 
   @override
   void initState() {
@@ -56,9 +72,9 @@ class _TrackerScreenState extends State<TrackerScreen> {
     if (mounted) setState(() => _version = v);
   }
 
-  Future<void> _pick(TrackerTheme t) async {
-    setState(() => _saving = t.id);
-    final ok = await _ble.setTrackerTheme(t.id);
+  Future<void> _pick({int? theme, int? digits}) async {
+    setState(() => _saving = theme != null ? 't$theme' : 'd$digits');
+    final ok = await _ble.setTrackerScreen(theme: theme, digits: digits);
     if (!mounted) return;
     setState(() => _saving = null);
     if (!ok) {
@@ -83,12 +99,7 @@ class _TrackerScreenState extends State<TrackerScreen> {
             children: [
               _statusCard(connected),
               const SizedBox(height: 22),
-              const Text('REP SCREEN',
-                  style: TextStyle(
-                      color: AppTheme.textSecondary,
-                      fontSize: 11,
-                      letterSpacing: 1.2,
-                      fontWeight: FontWeight.w700)),
+              _heading('REP SCREEN'),
               const SizedBox(height: 4),
               const Text('What the tracker shows while it counts your reps.',
                   style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
@@ -112,12 +123,52 @@ class _TrackerScreenState extends State<TrackerScreen> {
                       childAspectRatio: 0.78,
                       children: [
                         for (final t in trackerThemes)
-                          _ThemeCard(
-                            theme: t,
+                          _OptionCard(
+                            image: t.image,
+                            name: t.name,
+                            description: t.description,
                             selected: current == t.id,
-                            busy: _saving == t.id,
+                            busy: _saving == 't${t.id}',
                             enabled: supported && _saving == null,
-                            onTap: () => _pick(t),
+                            onTap: () => _pick(theme: t.id),
+                          ),
+                      ],
+                    ),
+                  ]);
+                },
+              ),
+              const SizedBox(height: 22),
+              _heading('NUMBERS'),
+              const SizedBox(height: 4),
+              const Text('The style of the rep count, on every screen. It '
+                  'always stays centred, however many digits.',
+                  style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
+              const SizedBox(height: 12),
+              ValueListenableBuilder<int?>(
+                valueListenable: _ble.trackerDigits,
+                builder: (context, current, _) {
+                  final supported = connected && current != null;
+                  return Column(children: [
+                    if (connected && current == null)
+                      _note('Update the tracker to firmware 1.6 or newer to '
+                          'choose its number style.'),
+                    GridView.count(
+                      crossAxisCount: 4,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      mainAxisSpacing: 8,
+                      crossAxisSpacing: 8,
+                      childAspectRatio: 0.72,
+                      children: [
+                        for (final d in trackerDigitStyles)
+                          _OptionCard(
+                            image: d.image,
+                            name: d.name,
+                            selected: current == d.id,
+                            busy: _saving == 'd${d.id}',
+                            enabled: supported && _saving == null,
+                            onTap: () => _pick(digits: d.id),
+                            compact: true,
                           ),
                       ],
                     ),
@@ -130,6 +181,13 @@ class _TrackerScreenState extends State<TrackerScreen> {
       ),
     );
   }
+
+  Widget _heading(String text) => Text(text,
+      style: const TextStyle(
+          color: AppTheme.textSecondary,
+          fontSize: 11,
+          letterSpacing: 1.2,
+          fontWeight: FontWeight.w700));
 
   Widget _note(String text) => Container(
         width: double.infinity,
@@ -209,29 +267,33 @@ class _TrackerScreenState extends State<TrackerScreen> {
   }
 }
 
-class _ThemeCard extends StatelessWidget {
-  final TrackerTheme theme;
-  final bool selected, busy, enabled;
+class _OptionCard extends StatelessWidget {
+  final String image, name;
+  final String? description;
+  final bool selected, busy, enabled, compact;
   final VoidCallback onTap;
-  const _ThemeCard(
-      {required this.theme,
+  const _OptionCard(
+      {required this.image,
+      required this.name,
+      this.description,
       required this.selected,
       required this.busy,
       required this.enabled,
-      required this.onTap});
+      required this.onTap,
+      this.compact = false});
 
   @override
   Widget build(BuildContext context) {
     return Opacity(
       opacity: enabled || selected ? 1 : 0.55,
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(compact ? 12 : 16),
         onTap: enabled && !selected ? onTap : null,
         child: Container(
-          padding: const EdgeInsets.all(10),
+          padding: EdgeInsets.all(compact ? 6 : 10),
           decoration: BoxDecoration(
             color: AppTheme.cardBg,
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(compact ? 12 : 16),
             border: Border.all(
                 color: selected ? AppTheme.neonGreen : AppTheme.cardBgLight,
                 width: selected ? 2 : 1),
@@ -239,29 +301,33 @@ class _ThemeCard extends StatelessWidget {
           child: Column(children: [
             Expanded(
               child: Stack(alignment: Alignment.center, children: [
-                Image.asset(theme.image, fit: BoxFit.contain),
+                Image.asset(image, fit: BoxFit.contain),
                 if (busy)
                   const CircularProgressIndicator(color: AppTheme.neonGreen),
                 if (selected)
-                  const Positioned(
+                  Positioned(
                     right: 0,
                     top: 0,
                     child: Icon(Icons.check_circle_rounded,
-                        color: AppTheme.neonGreen, size: 22),
+                        color: AppTheme.neonGreen, size: compact ? 16 : 22),
                   ),
               ]),
             ),
-            const SizedBox(height: 8),
-            Text(theme.name,
-                style: const TextStyle(
+            SizedBox(height: compact ? 4 : 8),
+            Text(name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
                     color: AppTheme.textPrimary,
-                    fontSize: 14,
+                    fontSize: compact ? 12 : 14,
                     fontWeight: FontWeight.w700)),
-            const SizedBox(height: 2),
-            Text(theme.description,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+            if (description != null) ...[
+              const SizedBox(height: 2),
+              Text(description!,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+            ],
           ]),
         ),
       ),

@@ -28,7 +28,12 @@ FONTS = [
     ("FONT_TINY", "Roboto-Medium.ttf", 13, ASCII, "dashboard footer, battery"),
     ("FONT_SMALL", "Roboto-Medium.ttf", 16, ASCII, "labels, clock"),
     ("FONT_MED", "Roboto-Bold.ttf", 28, ASCII, "status words: READY, HOLD, UPDATE"),
-    ("FONT_BIG", "Roboto-Bold.ttf", 56, " 0123456789", "today's reps"),
+    ("FONT_BIG", "Roboto-Bold.ttf", 56, " 0123456789", "rep count (Bold), today's reps"),
+    # Rep count in the other number styles / sizes: greyscale (1 byte a
+    # pixel) — at these sizes subpixels add nothing and would triple the size.
+    ("NUM_BOLD_L", "Roboto-Bold.ttf", 96, " 0123456789", "rep count, Bold, large", 1),
+    ("NUM_LIGHT_L", "Roboto-Regular.ttf", 96, " 0123456789", "rep count, Light, large", 1),
+    ("NUM_LIGHT_S", "Roboto-Regular.ttf", 56, " 0123456789", "rep count, Light", 1),
 ]
 
 # Coverage → value sent, for light text on black: blending in linear light.
@@ -36,8 +41,9 @@ GAMMA = [round(255 * (i / 255) ** (1 / 2.2)) for i in range(256)]
 FIR = [1, 2, 3, 2, 1]          # sums to 9
 
 
-def glyph(font3, ch):
-    """(w, h, dx, dy, adv, bytes): bytes = h rows of w pixels × 3 stripes."""
+def glyph(font3, ch, channels=3):
+    """(w, h, dx, dy, adv, bytes): bytes = h rows of w pixels × 3 stripes
+    (or × 1, plain coverage, when channels is 1)."""
     adv = int(round(font3.getlength(ch) / 3))
     if ch == " ":
         return 0, 0, 0, 0, adv, b""
@@ -63,16 +69,19 @@ def glyph(font3, ch):
                     acc += c * row[xx]
             filt.append(acc / 9)
         for i in range(w):
-            for k in range(3):
-                out.append(GAMMA[min(255, int(round(filt[3 * i + k])))])
+            if channels == 1:
+                out.append(GAMMA[min(255, int(round(sum(filt[3 * i:3 * i + 3]) / 3)))])
+            else:
+                for k in range(3):
+                    out.append(GAMMA[min(255, int(round(filt[3 * i + k])))])
     return w, h, px0, -py0, adv, bytes(out)
 
 
-def build(name, ttf, size, chars):
+def build(name, ttf, size, chars, channels=3):
     font3 = ImageFont.truetype(os.path.join(FONT_DIR, ttf), size * 3)
     gl, data = [], bytearray()
     for ch in chars:
-        w, h, dx, dy, adv, b = glyph(font3, ch)
+        w, h, dx, dy, adv, b = glyph(font3, ch, channels)
         gl.append((ord(ch), w, h, dx, dy, adv, len(data)))
         data += b
     ink = [g for g in gl if g[1]]
@@ -90,12 +99,14 @@ def main():
         "#include <stdint.h>",
         "",
         "struct SPGlyph { uint16_t code; uint8_t w, h; int8_t dx, dy; uint8_t adv; uint32_t off; };",
-        "struct SPFont { const SPGlyph* glyphs; uint16_t count; const uint8_t* data; uint8_t asc, desc; };",
+        "// ch: bytes per pixel, 3 = subpixel stripes, 1 = greyscale",
+        "struct SPFont { const SPGlyph* glyphs; uint16_t count; const uint8_t* data; uint8_t asc, desc, ch; };",
         "",
     ]
     total = 0
-    for name, ttf, size, chars, use in FONTS:
-        gl, data, asc, desc = build(name, ttf, size, chars)
+    for name, ttf, size, chars, use, *rest in FONTS:
+        channels = rest[0] if rest else 3
+        gl, data, asc, desc = build(name, ttf, size, chars, channels)
         total += len(data) + 12 * len(gl)
         lines.append(f"// {use}: {ttf} {size}px, {len(gl)} glyphs")
         lines.append(f"static const uint8_t {name}_data[{len(data)}] = {{")
@@ -106,7 +117,7 @@ def main():
         for code, w, h, dx, dy, adv, off in gl:
             lines.append(f"  {{{code},{w},{h},{dx},{dy},{adv},{off}}},")
         lines.append("};")
-        lines.append(f"static const SPFont {name} = {{{name}_glyphs, {len(gl)}, {name}_data, {asc}, {desc}}};")
+        lines.append(f"static const SPFont {name} = {{{name}_glyphs, {len(gl)}, {name}_data, {asc}, {desc}, {channels}}};")
         lines.append("")
     with open(OUT, "w") as f:
         f.write("\n".join(lines))

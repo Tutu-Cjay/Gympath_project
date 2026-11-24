@@ -30,10 +30,10 @@ class V:
             r"\{(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+)\}", m.group(1))]
         d = re.search(r"static const uint8_t %s_data\[\d+\] = \{(.*?)\};" % name, s, re.S)
         data = bytes(int(x) for x in re.findall(r"\d+", d.group(1)))
-        asc, desc = map(int, re.search(
-            r"static const SPFont %s = \{.*?, (\d+), (\d+)\};" % name, s).groups())
+        asc, desc, ch = map(int, re.search(
+            r"static const SPFont %s = \{.*?, (\d+), (\d+), (\d+)\};" % name, s).groups())
         g = {chr(c): (w, h, dx, dy, adv, off) for c, w, h, dx, dy, adv, off in glyphs}
-        return dict(g=g, data=data, asc=asc, desc=desc, H=asc + desc)
+        return dict(g=g, data=data, asc=asc, desc=desc, H=asc + desc, ch=ch)
 
     @staticmethod
     def width(f, s):
@@ -50,10 +50,12 @@ class V:
             w, h, dx, dy, adv, off = f["g"][ch]
             for j in range(h):
                 for i in range(w):
-                    a = f["data"][off + 3 * (j * w + i): off + 3 * (j * w + i) + 3]
+                    c = f["ch"]
+                    a = f["data"][off + c * (j * w + i): off + c * (j * w + i) + c]
                     if not any(a):
                         continue
-                    if V.ORDER == 0: aR, aG, aB = a[0], a[1], a[2]
+                    if c == 1: aR = aG = aB = a[0]
+                    elif V.ORDER == 0: aR, aG, aB = a[0], a[1], a[2]
                     elif V.ORDER == 1: aR, aG, aB = a[2], a[1], a[0]
                     else: aR = aG = aB = sum(a) // 3
                     x, y = pen + dx + i, y0 + f["asc"] - dy + j
@@ -67,7 +69,8 @@ class V:
 
 
 # ---- dashboard ----
-F={n:V.load(H,n) for n in ['FONT_TINY','FONT_SMALL','FONT_MED','FONT_BIG']}
+F={n:V.load(H,n) for n in ['FONT_TINY','FONT_SMALL','FONT_MED','FONT_BIG',
+                           'NUM_BOLD_L','NUM_LIGHT_L','NUM_LIGHT_S']}
 # rings (r, ir) and arc span: TFT angles 0 = bottom, clockwise; drawn 40..320
 RINGS=[(118,108),(104,98)]
 A0,SPAN=40,280
@@ -120,21 +123,49 @@ screens={
  'ota':[('FONT_MED',100,'UPDATE'),('FONT_MED',138,'100%')],
  'otafail':[('FONT_MED',100,'UPDATE'),('FONT_MED',138,'FAILED')],
  'sensor':[('FONT_MED',100,'SENSOR'),('FONT_MED',138,'ERROR')],
- 'theme stroke':[('FONT_BIG',112,'888'),('FONT_SMALL',150,'reps')],
- 'theme tempo':[('FONT_MED',62,'LOWER'),('FONT_BIG',118,'888'),('FONT_SMALL',166,'up 9.9s  down 9.9s'),('FONT_TINY',186,'last rep')],
- 'theme minimal':[('FONT_BIG',120,'888')],
+ # rep screens: ('COUNT', y, large) is the rep count, checked in every
+ # number style with 3 and 4 digits (firmware drawCount)
+ 'theme classic':[('COUNT',120,True)],
+ 'theme stroke':[('COUNT',112,False),('FONT_SMALL',150,'reps')],
+ 'theme tempo':[('FONT_MED',62,'LOWER'),('COUNT',118,False),('FONT_SMALL',166,'up 9.9s  down 9.9s'),('FONT_TINY',186,'last rep')],
+ 'theme minimal':[('COUNT',120,True)],
 }
-for name,items in screens.items():
+NUM_STYLES=['segment','rounded','bold','light']
+def count_layout(style,txt,large,cy):
+    """As drawCount: ('seg', s, box) or ('font', name, box)."""
+    many=len(txt)>=4
+    if style<=1:
+        sz=(4 if many else 6) if large else (2 if many else 3)
+        w=len(txt)*8*sz+(len(txt)-1)*2*sz; h=17*sz
+        cx=120-((7*sz)//2 if txt[0]=='1' else 0)    # segInkShift
+        # ink box: a leading 1 lights only its cell's right edge
+        x0=cx-w//2+(7*sz if txt[0]=='1' else 0)
+        return 'seg',(sz,cx),(x0,cy-h//2,cx-w//2+w,cy-h//2+h)
+    name=('NUM_BOLD_L' if large and not many else 'FONT_BIG') if style==2 else \
+         ('NUM_LIGHT_L' if large and not many else 'NUM_LIGHT_S')
+    fo=F[name]; w=V.width(fo,txt)
+    g0,g1=fo['g'][txt[0]],fo['g'][txt[-1]]               # fontInkShift
+    cx=120-((g0[2]+(w-g1[4]+g1[2]+g1[0]))//2-w//2)
+    return 'font',(name,cx),(cx-w//2,cy-fo['H']//2,cx-w//2+w,cy-fo['H']//2+fo['H'])
+def screen_variants(items):
+    if not any(f=='COUNT' for f,_,_ in items): yield '',items; return
+    for st in range(len(NUM_STYLES)):
+        for txt in ('888','1888','188','111'):
+            yield f' [{NUM_STYLES[st]} {txt}]',[(f,y,(st,txt,s) if f=='COUNT' else s) for f,y,s in items]
+for name0,items0 in screens.items():
+  for tag,items in screen_variants(items0):
+    name=name0+tag
     bx=[]
     for f,y,s in items:
-        fo=F[f]; w=V.width(fo,s); b=(120-w//2,y-fo['H']//2,120-w//2+w,y-fo['H']//2+fo['H'])
+        if f=='COUNT':
+            st,txt,large=s; b=count_layout(st,txt,large,y)[2]; s=txt
+        else:
+            fo=F[f]; w=V.width(fo,s); b=(120-w//2,y-fo['H']//2,120-w//2+w,y-fo['H']//2+fo['H'])
         worst=max(math.hypot(x-120,yy-120) for x in (b[0],b[2]) for yy in (b[1],b[3]))
         if worst>104: print(name,s,'reaches r=%.1f (ring at 105)'%worst); bad+=1
         for o in bx:
             if b[0]<o[2] and o[0]<b[2] and b[1]<o[3] and o[1]<b[3]: print(name,'overlap',s); bad+=1
         bx.append(b)
-# 7-seg digits for the rep count: 3 digits s=6 -> 168x102
-w,h=3*48+2*12,102; print('7seg 3 digits corner r=%.1f'%math.hypot(w/2,h/2))
 
 
 def preview(path):
