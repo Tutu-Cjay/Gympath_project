@@ -24,6 +24,9 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.2.2: the screen redraws only what changed (text in place, rings by the
+ * changed arc, digits by the segments that switch), so it no longer
+ * flickers or stalls on full-screen repaints.
  * 1.2.1: charging is detected and shown (CHG and a bolt on the battery):
  * a computer on USB, a charger plugged in or out (the voltage step), or a
  * voltage that keeps rising or sits at 4.2 V; the percentage while charging
@@ -53,10 +56,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.2.1"     // bump on every release; the app compares it
+#define FW_VERSION   "1.2.2"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-5"
+#define FW_BUILD     "TRACK-1D-6"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -226,13 +229,6 @@ struct __attribute__((packed)) DayPacket {
   uint8_t  musclesTotal;
 };
 static_assert(sizeof(DayPacket) == 23, "DayPacket is 23 bytes");
-
-// what the idle dashboard last drew (redrawn when any of it changes); kept
-// up here so Arduino's generated prototypes can see it
-struct DashKey {
-  uint16_t dayVer; int8_t bat; bool batPresent, charging, connected, clock;
-  int32_t minute;
-};
 
 DayPacket         day = {};
 volatile bool     dayValid = false;     // have numbers (from the app or NVS)
@@ -548,33 +544,83 @@ void repStep() {
 }
 
 /* ================= DISPLAY (core 0) ================= */
+// The panel is slow to fill (SPI), so every screen redraws only what changed:
+// text is overwritten in place (padded to the old text's width), rings are
+// extended or shortened by the changed arc, 7-segment digits change only the
+// segments that switch, and a full clear happens only when the screen
+// itself changes.
 const bool segMap[10][7] = {
   {1,1,1,1,1,1,0},{0,1,1,0,0,0,0},{1,1,0,1,1,0,1},{1,1,1,1,0,0,1},
   {0,1,1,0,0,1,1},{1,0,1,1,0,1,1},{1,0,1,1,1,1,1},{1,1,1,0,0,0,0},
   {1,1,1,1,1,1,1},{1,1,1,1,0,1,1}
 };
+const int SEG_S = 6;                         // segment thickness (px)
 
-void draw7SegDigit(int dgt, int x, int y, int s, uint16_t c) {
-  if (dgt < 0 || dgt > 9) return;
+void fillSegment(int k, int x, int y, int s, uint16_t c) {
   int w = 6 * s, h = s, vv = 7 * s;
-  if (segMap[dgt][0]) tft.fillRect(x + h, y, w, h, c);
-  if (segMap[dgt][1]) tft.fillRect(x + w + h, y + h, h, vv, c);
-  if (segMap[dgt][2]) tft.fillRect(x + w + h, y + vv + 2*h, h, vv, c);
-  if (segMap[dgt][3]) tft.fillRect(x + h, y + 2*vv + 2*h, w, h, c);
-  if (segMap[dgt][4]) tft.fillRect(x, y + vv + 2*h, h, vv, c);
-  if (segMap[dgt][5]) tft.fillRect(x, y + h, h, vv, c);
-  if (segMap[dgt][6]) tft.fillRect(x + h, y + vv + h, w, h, c);
+  switch (k) {
+    case 0: tft.fillRect(x + h, y, w, h, c); break;
+    case 1: tft.fillRect(x + w + h, y + h, h, vv, c); break;
+    case 2: tft.fillRect(x + w + h, y + vv + 2*h, h, vv, c); break;
+    case 3: tft.fillRect(x + h, y + 2*vv + 2*h, w, h, c); break;
+    case 4: tft.fillRect(x, y + vv + 2*h, h, vv, c); break;
+    case 5: tft.fillRect(x, y + h, h, vv, c); break;
+    case 6: tft.fillRect(x + h, y + vv + h, w, h, c); break;
+  }
 }
 
-void draw7SegNumber(int n, int cx, int cy, int s, uint16_t c) {
-  String str = String(n);
-  int dw = 8 * s, dh = 17 * s, sp = 2 * s;
-  int tw = str.length() * dw + (str.length() - 1) * sp;
-  int x = cx - tw / 2, y = cy - dh / 2;
-  for (unsigned i = 0; i < str.length(); i++) {
-    draw7SegDigit(str[i] - '0', x, y, s, c);
-    x += dw + sp;
+// What the 7-segment number currently shows.
+char     segShown[8] = "";
+uint16_t segColor = 0;
+
+void segBox(int len, int cx, int cy, int& x, int& y, int& w, int& h) {
+  int dw = 8 * SEG_S, sp = 2 * SEG_S;
+  w = len * dw + (len - 1) * sp;
+  h = 17 * SEG_S;
+  x = cx - w / 2; y = cy - h / 2;
+}
+
+void update7Seg(int n, int cx, int cy, uint16_t c) {
+  char str[8];
+  snprintf(str, sizeof str, "%d", n < 0 ? 0 : n);
+  int len = strlen(str), oldLen = strlen(segShown);
+  if (len != oldLen) {               // the digits move: clear the old ones
+    if (oldLen) {
+      int x, y, w, h;
+      segBox(oldLen, cx, cy, x, y, w, h);
+      tft.fillRect(x, y, w, h, TFT_BLACK);
+    }
+    segShown[0] = 0;
+    oldLen = 0;
   }
+  int x, y, w, h;
+  segBox(len, cx, cy, x, y, w, h);
+  for (int i = 0; i < len; i++) {
+    int nd = str[i] - '0', od = oldLen ? segShown[i] - '0' : -1;
+    for (int k = 0; k < 7; k++) {
+      bool on = segMap[nd][k], was = od >= 0 && segMap[od][k];
+      if (on && (!was || c != segColor)) fillSegment(k, x, y, SEG_S, c);
+      else if (!on && was) fillSegment(k, x, y, SEG_S, TFT_BLACK);
+    }
+    x += 8 * SEG_S + 2 * SEG_S;
+  }
+  strcpy(segShown, str);
+  segColor = c;
+}
+
+// Text at (x, y), middle-centre, replacing `shown` without clearing more
+// than the old text covered. Returns true when it drew.
+bool textDelta(char* shown, size_t cap, const char* now, int x, int y,
+               int font, uint16_t fg) {
+  if (strcmp(shown, now) == 0) return false;
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(fg, TFT_BLACK);
+  tft.setTextPadding(shown[0] ? tft.textWidth(shown, font) : 0);
+  tft.drawString(now, x, y, font);
+  tft.setTextPadding(0);
+  strncpy(shown, now, cap - 1);
+  shown[cap - 1] = 0;
+  return true;
 }
 
 /* ================= IDLE DASHBOARD ================= */
@@ -586,11 +632,36 @@ const uint16_t COL_BLUE   = 0x3D9F;
 const uint16_t COL_ORANGE = 0xFC47;   // #FF8A3D
 const uint16_t COL_TRACK  = 0x2945;   // ring background
 const uint16_t COL_MUTED  = 0x8410;
+const uint32_t RING_A0 = 40, RING_SPAN = 280;   // gap at the bottom
 
+// What the dashboard currently shows; valid = false redraws it all.
+struct DashView {
+  bool valid;
+  bool synced;
+  uint32_t ringOut, ringIn;         // end angle of each ring's fill
+  int8_t bat; bool batPresent, charging, connected, linkDrawn;
+  char top[24], big[8], goal[16], l1[24], l2[24], l3[32];
+  uint8_t dots; int8_t today;
+};
+DashView dv;
+
+uint32_t ringEnd(float frac) {
+  if (frac <= 0.005f) return RING_A0;
+  return RING_A0 + (uint32_t)(RING_SPAN * fminf(frac, 1.0f));
+}
+
+// Move a ring's fill from its old end angle to the new one: only the arc in
+// between is painted.
+void ringDelta(int r, int ir, uint32_t& shown, uint32_t now, uint16_t fg) {
+  if (now == shown) return;
+  if (now > shown) tft.drawSmoothArc(120, 120, r, ir, shown, now, fg, TFT_BLACK, false);
+  else tft.drawSmoothArc(120, 120, r, ir, now, shown, COL_TRACK, TFT_BLACK, false);
+  shown = now;
+}
 
 void drawBattery(int cx, int cy) {
   int pct = batPct;
-  char txt[8];
+  char txt[12];
   if (!batPresent) snprintf(txt, sizeof txt, "USB");
   else if (pct < 0) snprintf(txt, sizeof txt, "--%%");
   else if (batCharging) snprintf(txt, sizeof txt, "%d%% CHG", pct);
@@ -600,6 +671,7 @@ void drawBattery(int cx, int cy) {
              : pct > 50 ? COL_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
   int w = 22, h = 11;
   int x = cx - 30, y = cy - h / 2;
+  tft.fillRect(x, y - 3, 92, h + 6, TFT_BLACK);   // just the battery strip
   tft.drawRoundRect(x, y, w, h, 2, TFT_WHITE);
   tft.fillRect(x + w, y + 3, 2, 5, TFT_WHITE);
   if (batPresent && pct > 0) tft.fillRect(x + 2, y + 2, (w - 4) * pct / 100, h - 4, c);
@@ -614,118 +686,121 @@ void drawBattery(int cx, int cy) {
   tft.drawString(txt, x + w + 6, cy, 2);
 }
 
-void drawRing(int r, int ir, float frac, uint16_t fg) {
-  const uint32_t a0 = 40, span = 280;               // gap at the bottom
-  tft.drawSmoothArc(120, 120, r, ir, a0, a0 + span, COL_TRACK, TFT_BLACK, true);
-  if (frac > 0.005f) {
-    uint32_t a1 = a0 + (uint32_t)(span * fminf(frac, 1.0f));
-    if (a1 <= a0 + 2) a1 = a0 + 3;
-    tft.drawSmoothArc(120, 120, r, ir, a0, a1, fg, TFT_BLACK, true);
-  }
+void dashDot(int i, bool on, bool today) {
+  int x = 120 + (i - 3) * 15, y = 196;
+  tft.fillCircle(x, y, 7, TFT_BLACK);
+  if (on) tft.fillCircle(x, y, 5, COL_ORANGE);
+  else tft.drawCircle(x, y, 5, COL_TRACK);
+  if (today) tft.drawCircle(x, y, 7, TFT_WHITE);
 }
 
-void drawDashboard(const DashKey& k) {
+void updateDashboard() {
   static const char* DAYS[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
-  tft.fillScreen(TFT_BLACK);
+  bool synced = dayValid;
+  if (dv.valid && dv.synced != synced) dv.valid = false;   // layout changes
+  if (!dv.valid) {
+    tft.fillScreen(TFT_BLACK);
+    memset(&dv, 0, sizeof dv);
+    dv.bat = -2;
+    dv.today = -2;
+    dv.ringOut = dv.ringIn = RING_A0;
+    tft.drawSmoothArc(120, 120, 118, 108, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, false);
+    tft.drawSmoothArc(120, 120, 104, 98, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, false);
+    dv.valid = true;
+    dv.synced = synced;
+  }
 
   // Today's numbers; a new day (or week) starts them from zero.
   uint16_t reps = 0, sets = 0, goal = 60, mAct = 0, mTot = 13;
   uint32_t kg = 0;
   uint8_t weekMask = 0, daysWeek = 0, weekGoal = 3, streak = 0;
-  bool stale = false;
-  if (dayValid) {
+  bool clock = clockValid;
+  if (synced) {
     reps = day.reps; sets = day.sets; kg = day.volumeKg;
     goal = day.repGoal ? day.repGoal : 60;
     mAct = day.musclesActive; mTot = day.musclesTotal ? day.musclesTotal : 13;
     weekMask = day.weekMask; daysWeek = day.daysThisWeek;
     weekGoal = day.weekGoal ? day.weekGoal : 3; streak = day.weekStreak;
-    if (k.clock) {
+    if (clock) {
       uint32_t d0 = day.localEpoch / 86400, d1 = localNow() / 86400;
       if (d1 != d0) {
-        reps = sets = mAct = 0; kg = 0; stale = true;
+        reps = sets = mAct = 0; kg = 0;
         // 1 Jan 1970 was a Thursday: Monday-based week = (d + 3) / 7
         if ((d1 + 3) / 7 != (d0 + 3) / 7) { weekMask = 0; daysWeek = 0; }
       }
     }
   }
 
-  drawRing(118, 108, goal ? (float)reps / goal : 0, COL_GREEN);
-  drawRing(104, 98, mTot ? (float)mAct / mTot : 0, COL_BLUE);
+  ringDelta(118, 108, dv.ringOut, synced && goal ? ringEnd((float)reps / goal) : RING_A0, COL_GREEN);
+  ringDelta(104, 98, dv.ringIn, synced && mTot ? ringEnd((float)mAct / mTot) : RING_A0, COL_BLUE);
 
-  drawBattery(120, 44);
-  // Bluetooth: green dot when the app is connected
-  tft.fillCircle(72, 44, 3, k.connected ? COL_GREEN : COL_TRACK);
-
-  tft.setTextDatum(MC_DATUM);
-  uint32_t t = k.clock ? localNow() : day.localEpoch;
-  uint32_t dIdx = t / 86400;
-  int wd = (int)((dIdx + 3) % 7);                   // 0 = Monday
-  char line[32];
-  if (k.clock) {
-    snprintf(line, sizeof line, "%s  %02lu:%02lu", DAYS[wd],
-             (unsigned long)(t / 3600 % 24), (unsigned long)(t / 60 % 60));
-  } else if (dayValid) {
-    snprintf(line, sizeof line, "last sync: %s", DAYS[wd]);
-  } else {
-    snprintf(line, sizeof line, "Gympath");
+  if (dv.bat != (int8_t)batPct || dv.batPresent != batPresent || dv.charging != batCharging) {
+    drawBattery(120, 44);
+    dv.bat = (int8_t)batPct; dv.batPresent = batPresent; dv.charging = batCharging;
   }
-  tft.setTextColor(COL_MUTED, TFT_BLACK);
-  tft.drawString(line, 120, 66, 2);
+  bool connected = bleServer && bleServer->getConnectedCount() > 0;
+  if (connected != dv.connected || !dv.linkDrawn) {
+    tft.fillCircle(72, 44, 3, connected ? COL_GREEN : COL_TRACK);
+    dv.connected = connected;
+    dv.linkDrawn = true;
+  }
 
-  if (!dayValid) {
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("READY", 120, 112, 4);
-    tft.setTextColor(COL_MUTED, TFT_BLACK);
-    tft.drawString("open the app to sync", 120, 145, 2);
+  uint32_t t = clock ? localNow() : day.localEpoch;
+  int wd = (int)((t / 86400 + 3) % 7);              // 0 = Monday
+  char line[32];
+  if (clock) snprintf(line, sizeof line, "%s  %02lu:%02lu", DAYS[wd],
+                      (unsigned long)(t / 3600 % 24), (unsigned long)(t / 60 % 60));
+  else if (synced) snprintf(line, sizeof line, "last sync: %s", DAYS[wd]);
+  else snprintf(line, sizeof line, "Gympath");
+  textDelta(dv.top, sizeof dv.top, line, 120, 66, 2, COL_MUTED);
+
+  if (!synced) {
+    textDelta(dv.l1, sizeof dv.l1, "READY", 120, 112, 4, TFT_WHITE);
+    textDelta(dv.l2, sizeof dv.l2, "open the app to sync", 120, 145, 2, COL_MUTED);
     return;
   }
 
-  // reps today, big
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   snprintf(line, sizeof line, "%u", reps);
-  tft.drawString(line, 120, 106, 6);
-  tft.setTextColor(COL_GREEN, TFT_BLACK);
+  textDelta(dv.big, sizeof dv.big, line, 120, 106, 6, TFT_WHITE);
   snprintf(line, sizeof line, "reps / %u", goal);
-  tft.drawString(line, 120, 138, 2);
-
-  // sets · weight lifted
+  textDelta(dv.goal, sizeof dv.goal, line, 120, 138, 2, COL_GREEN);
   if (kg >= 1000) snprintf(line, sizeof line, "%u sets  %.1f t", sets, kg / 1000.0f);
   else snprintf(line, sizeof line, "%u sets  %lu kg", sets, (unsigned long)kg);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(line, 120, 158, 2);
-  tft.setTextColor(COL_BLUE, TFT_BLACK);
+  textDelta(dv.l1, sizeof dv.l1, line, 120, 158, 2, TFT_WHITE);
   snprintf(line, sizeof line, "muscles %u/%u", mAct, mTot);
-  tft.drawString(line, 120, 175, 2);
+  textDelta(dv.l2, sizeof dv.l2, line, 120, 175, 2, COL_BLUE);
 
-  // this week: Monday … Sunday
+  // this week: Monday … Sunday, only the dots that changed
+  int8_t today = clock ? wd : -1;
   for (int i = 0; i < 7; i++) {
-    int x = 120 + (i - 3) * 15, y = 196;
-    bool on = weekMask & (1 << i);
-    if (on) tft.fillCircle(x, y, 5, COL_ORANGE);
-    else tft.drawCircle(x, y, 5, COL_TRACK);
-    if (k.clock && i == wd) tft.drawCircle(x, y, 7, TFT_WHITE);
+    bool on = weekMask & (1 << i), was = dv.dots & (1 << i);
+    bool isToday = i == today, wasToday = i == dv.today;
+    if (on != was || isToday != wasToday || dv.today == -2) dashDot(i, on, isToday);
   }
-  tft.setTextColor(daysWeek >= weekGoal ? COL_GREEN : COL_MUTED, TFT_BLACK);
+  dv.dots = weekMask; dv.today = today;
   snprintf(line, sizeof line, "%u/%u days  %u wk streak", daysWeek, weekGoal, streak);
-  tft.drawString(line, 120, 214, 1);
-  (void)stale;
+  // colour flips when the week's goal is met: redraw the line then
+  static bool metShown = false;
+  bool met = daysWeek >= weekGoal;
+  if (met != metShown) { dv.l3[0] = 0; metShown = met; }
+  textDelta(dv.l3, sizeof dv.l3, line, 120, 214, 1, met ? COL_GREEN : COL_MUTED);
 }
 
 void displayTask(void*) {
-  uint8_t lastState = 0xFF;
-  int lastReps = -1;
-  uint16_t lastColor = 0;
-  int lastPct = -1;
-  bool lastTest = false;
-  static DashKey shown;
-  bool dashOn = false;
+  uint8_t  shownState = 0xFF;   // which status screen is up
+  bool     shownTest = false;
+  uint16_t ringColor = 0;       // colour of the outer ring now
+  int      lastPct = -1;        // OTA screens: −1 none, −2 failed, −3 sensor
+  bool     dashOn = false;
   for (;;) {
-    // leaving the dashboard (a set, an update, an error): clear its rings
     bool otaScreen = otaState == OTA_RECEIVING || otaState == OTA_DONE ||
                      (otaState == OTA_ERROR && millis() - otaErrorMs < 3000);
+    // leaving the dashboard (a set, an update, an error): clear its rings
     if (dashOn && (state != ST_IDLE || testMode || !imuOk || otaScreen)) {
       tft.fillScreen(TFT_BLACK);
       dashOn = false;
+      shownState = 0xFF;
+      ringColor = 0;
       lastPct = -1;
     }
     // firmware update screen takes over while an update is running
@@ -734,33 +809,33 @@ void displayTask(void*) {
       int pct = otaSize ? (int)((uint64_t)otaWritten * 100 / otaSize) : 0;
       if (os == OTA_DONE) pct = 100;
       if (pct != lastPct) {
-        if (lastPct < 0) tft.fillCircle(120, 120, 100, TFT_BLACK);
+        if (lastPct < 0) tft.fillCircle(120, 120, 104, TFT_BLACK);
         tft.setTextDatum(MC_DATUM);
         tft.setTextColor(TFT_WHITE, TFT_BLACK);
         tft.drawString(os == OTA_DONE ? "RESTART" : "UPDATE", 120, 100, 4);
         tft.drawString(String("  ") + pct + "%  ", 120, 140, 4);
         lastPct = pct;
-        lastState = 0xFF;   // force a full redraw when the update ends
+        shownState = 0xFF;   // status screen redraws when the update ends
       }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     if (os == OTA_ERROR && millis() - otaErrorMs < 3000) {
       if (lastPct != -2) {
-        tft.fillCircle(120, 120, 100, TFT_BLACK);
+        tft.fillCircle(120, 120, 104, TFT_BLACK);
         tft.setTextDatum(MC_DATUM);
         tft.setTextColor(TFT_RED, TFT_BLACK);
         tft.drawString("UPDATE", 120, 100, 4);
         tft.drawString("FAILED", 120, 140, 4);
         lastPct = -2;
-        lastState = 0xFF;
+        shownState = 0xFF;
       }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     if (!imuOk) {
       if (lastPct != -3) {
-        tft.fillCircle(120, 120, 100, TFT_BLACK);
+        tft.fillCircle(120, 120, 104, TFT_BLACK);
         tft.setTextDatum(MC_DATUM);
         tft.setTextColor(TFT_RED, TFT_BLACK);
         tft.drawString("SENSOR", 120, 100, 4);
@@ -770,26 +845,24 @@ void displayTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
     }
-    lastPct = -1;
-    // between sets: the day's dashboard (redrawn when something on it changes)
+    if (lastPct != -1) {            // an update screen just ended
+      tft.fillScreen(TFT_BLACK);
+      lastPct = -1;
+      shownState = 0xFF;
+      ringColor = 0;
+      dv.valid = false;
+    }
+
+    // between sets: the day's dashboard
     if (state == ST_IDLE && !testMode) {
-      DashKey k;
-      memset(&k, 0, sizeof k);
-      k.dayVer = dayVersion; k.bat = (int8_t)batPct; k.batPresent = batPresent;
-      k.charging = batCharging; k.clock = clockValid;
-      k.connected = bleServer && bleServer->getConnectedCount() > 0;
-      k.minute = clockValid ? (int32_t)(localNow() / 60) : -1;
-      if (!dashOn || memcmp(&k, &shown, sizeof k) != 0) {
-        drawDashboard(k);
-        shown = k;
-        dashOn = true;
-      }
-      lastState = 0xFF;
+      if (!dashOn) { dv.valid = false; dashOn = true; }
+      updateDashboard();
       vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
+
     uint8_t st = state;
-    int r = reps;
+    bool tm = testMode;
     // ring colour follows speed: blue (slow) → green → red (fast)
     float t = fminf(fabsf(vNow) / 0.8f, 1.0f);
     t = roundf(t * 10.0f) / 10.0f;
@@ -798,15 +871,14 @@ void displayTask(void*) {
     uint8_t B = t < 0.5f ? (uint8_t)((1 - t * 2) * 255) : 0;
     uint16_t color = st == ST_TRACK ? tft.color565(R, G, B) : 0x5E89;
 
-    bool tm = testMode;
-    if (st != lastState || r != lastReps || color != lastColor || tm != lastTest) {
-      if (st != lastState || r != lastReps || tm != lastTest)
-        tft.fillCircle(120, 120, 100, TFT_BLACK);
-      for (int rad = 105; rad < 121; rad++) tft.drawSmoothCircle(120, 120, rad, color, color);
+    // a different status screen: clear the inside once, draw its text
+    if (st != shownState || tm != shownTest) {
+      tft.fillCircle(120, 120, 104, TFT_BLACK);
+      segShown[0] = 0;
       tft.setTextDatum(MC_DATUM);
       tft.setTextColor(TFT_WHITE, TFT_BLACK);
       switch (st) {
-        case ST_IDLE:       tft.drawString("READY", 120, 112, 4);
+        case ST_IDLE:       tft.drawString("READY", 120, 112, 4);      // USB test only
                             tft.drawString("press Start", 120, 145, 2); break;
         case ST_CALIB:      tft.drawString("HOLD", 120, 112, 4);
                             tft.drawString("still...", 120, 145, 2); break;
@@ -820,17 +892,25 @@ void displayTask(void*) {
           tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
           tft.drawString(l1, 120, 160, 2);
           tft.drawString(l2, 120, 178, 2);
-          tft.setTextColor(TFT_WHITE, TFT_BLACK);
           break;
         }
-        default:            draw7SegNumber(r, 120, 120, 6, color); break;
+        default: break;
       }
       if (tm) {
         tft.setTextColor(TFT_YELLOW, TFT_BLACK);
         tft.drawString("USB TEST", 120, 38, 2);
       }
-      lastState = st; lastReps = r; lastColor = color; lastTest = tm;
+      shownState = st;
+      shownTest = tm;
+      ringColor = 0;
     }
+    // the ring repaints only when its colour changes (one arc, not 16 circles)
+    if (color != ringColor) {
+      tft.drawSmoothArc(120, 120, 120, 105, 0, 360, color, TFT_BLACK, false);
+      ringColor = color;
+    }
+    // the rep count changes only the segments that switch
+    if (st == ST_TRACK) update7Seg(reps, 120, 120, color);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
