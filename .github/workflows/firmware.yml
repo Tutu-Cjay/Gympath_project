@@ -85,6 +85,45 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
+      # For flashing over USB (first install, or when an update over the air
+      # will not go through): one image with bootloader, partition table,
+      # OTA data and app, written at 0x0. boot_app0 makes it boot this app.
+      - name: Make full USB image and Windows flasher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          core=~/.arduino15/packages/esp32/hardware/esp32/$ESP32_CORE
+          esptool=$(ls ~/.arduino15/packages/esp32/tools/esptool_py/*/esptool.py | head -1)
+          full="gympath_track-$VERSION-full.bin"
+          python3 "$esptool" --chip esp32s3 merge_bin -o "$full" \
+            --flash_mode keep --flash_freq keep --flash_size keep \
+            0x0 build/Gympath_Track.ino.bootloader.bin \
+            0x8000 build/Gympath_Track.ino.partitions.bin \
+            0xe000 "$core/tools/partitions/boot_app0.bin" \
+            0x10000 build/Gympath_Track.ino.bin
+          ls -l "$full"
+          # Windows: esptool.exe + a double-click script
+          mkdir -p flasher
+          gh release download --repo espressif/esptool --pattern '*win64.zip' --dir flasher-dl
+          unzip -q flasher-dl/*win64.zip -d flasher-dl
+          cp "$(find flasher-dl -iname esptool.exe | head -1)" flasher/esptool.exe
+          cp "$full" flasher/gympath_track-full.bin
+          printf '%s\r\n' \
+            '@echo off' \
+            'echo Gympath tracker firmware %VERSION% - USB flasher' \
+            'echo Connect the tracker with a USB-C data cable, then press a key.' \
+            'echo (If it is not found: hold BOOT, plug the cable in, release BOOT.)' \
+            'pause' \
+            '"%~dp0esptool.exe" --chip esp32s3 --baud 921600 write_flash 0x0 "%~dp0gympath_track-full.bin"' \
+            'echo.' \
+            'if errorlevel 1 (echo FAILED - see the message above.) else (echo Done. Press RESET or unplug and plug the tracker in again.)' \
+            'pause' | sed "s/%VERSION%/$VERSION/" > flasher/flash_gympath.bat
+          (cd flasher && zip -q -r "../gympath_flasher_windows-$VERSION.zip" .)
+          ls -l gympath_flasher_windows-*.zip
+          echo "full=$full" >> "$GITHUB_ENV"
+          echo "flasher=gympath_flasher_windows-$VERSION.zip" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
           name: gympath-firmware
@@ -103,14 +142,17 @@ jobs:
           NAME: ${{ steps.meta.outputs.name }}
         run: |
           gh release delete firmware-latest --yes --cleanup-tag || true
-          gh release create firmware-latest "$NAME" manifest.json \
+          gh release create firmware-latest "$NAME" manifest.json "$full" "$flasher" \
             --prerelease --target "$GITHUB_SHA" \
             --title "Tracker firmware $VERSION (latest)" \
             --notes "$(jq -r .notes manifest.json)
 
-          Install from the app: Home → update icon (over Bluetooth). Built from ${GITHUB_SHA::7}."
+          Install from the app: Home → update icon (over Bluetooth).
+          Over USB (Windows): download gympath_flasher_windows-$VERSION.zip, unzip, run flash_gympath.bat.
+          Other systems: esptool --chip esp32s3 write_flash 0x0 $full
+          Built from ${GITHUB_SHA::7}."
           if ! gh release view "firmware-v$VERSION" >/dev/null 2>&1; then
-            gh release create "firmware-v$VERSION" "$NAME" manifest.json \
+            gh release create "firmware-v$VERSION" "$NAME" manifest.json "$full" "$flasher" \
               --prerelease --target "$GITHUB_SHA" \
               --title "Tracker firmware $VERSION" --notes "$(jq -r .notes manifest.json)"
           fi
