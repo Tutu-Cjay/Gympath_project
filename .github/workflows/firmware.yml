@@ -105,9 +105,14 @@ jobs:
           ls -l "$full"
           # Windows: esptool.exe + a double-click script
           mkdir -p flasher
-          gh release download --repo espressif/esptool --pattern '*win64.zip' --dir flasher-dl
-          unzip -q flasher-dl/*win64.zip -d flasher-dl
-          cp "$(find flasher-dl -iname esptool.exe | head -1)" flasher/esptool.exe
+          # the Windows build's asset name changed between esptool versions
+          gh release view --repo espressif/esptool --json assets --jq '.assets[].name'
+          gh release download --repo espressif/esptool --pattern '*win*' --dir flasher-dl
+          for z in flasher-dl/*.zip; do unzip -q -o "$z" -d flasher-dl; done
+          exe=$(find flasher-dl -iname esptool.exe | head -1)
+          test -n "$exe"
+          cp "$exe" flasher/esptool.exe
+          # newer esptool spells it write-flash; both accept write_flash
           cp "$full" flasher/gympath_track-full.bin
           printf '%s\r\n' \
             '@echo off' \
