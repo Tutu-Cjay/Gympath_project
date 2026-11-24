@@ -222,6 +222,13 @@ struct __attribute__((packed)) DayPacket {
 };
 static_assert(sizeof(DayPacket) == 23, "DayPacket is 23 bytes");
 
+// what the idle dashboard last drew (redrawn when any of it changes); kept
+// up here so Arduino's generated prototypes can see it
+struct DashKey {
+  uint16_t dayVer; int8_t bat; bool batPresent, charging, connected, clock;
+  int32_t minute;
+};
+
 DayPacket         day = {};
 volatile bool     dayValid = false;     // have numbers (from the app or NVS)
 volatile bool     clockValid = false;   // the app gave the time since boot
@@ -520,10 +527,6 @@ const uint16_t COL_ORANGE = 0xFC47;   // #FF8A3D
 const uint16_t COL_TRACK  = 0x2945;   // ring background
 const uint16_t COL_MUTED  = 0x8410;
 
-struct DashKey {
-  uint16_t dayVer; int8_t bat; bool batPresent, charging, connected, clock;
-  int32_t minute;
-};
 
 void drawBattery(int cx, int cy) {
   int pct = batPct;
