@@ -33,6 +33,7 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
   FirmwareManifest? _latest;
   double _progress = 0;
   String? _error;
+  int _attempt = 0; // > 0 while retrying after a failed transfer
 
   bool get _busy =>
       _phase == _Phase.checking ||
@@ -92,11 +93,36 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
         _progress = 0;
       });
       final image = await _fw.download(m);
-      if (!mounted) return;
-      setState(() => _phase = _Phase.flashing);
-      await _fw.flash(image, onProgress: (p) {
-        if (mounted) setState(() => _progress = p);
-      });
+      // A transfer that breaks off (radio hiccup, link drop) leaves the old
+      // firmware running; start it again, reconnecting first if needed.
+      const attempts = 3;
+      for (_attempt = 0;; _attempt++) {
+        if (!mounted) return;
+        setState(() {
+          _phase = _Phase.flashing;
+          _progress = 0;
+        });
+        try {
+          if (!_ble.isConnected || !_ble.otaSupported.value) {
+            await _ble.connect();
+            for (var i = 0; i < 20 && !_ble.otaSupported.value; i++) {
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+            if (!_ble.otaSupported.value) throw Exception('Tracker not reconnected');
+          }
+          await _fw.flash(image, onProgress: (p) {
+            if (mounted) setState(() => _progress = p);
+          });
+          break;
+        } catch (e) {
+          if (_attempt + 1 >= attempts) {
+            throw Exception('$e (after $attempts tries)'
+                .replaceFirst('Exception: ', ''));
+          }
+          debugPrint('[OTA] try ${_attempt + 1} failed: $e');
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+      }
       if (!mounted) return;
       setState(() => _phase = _Phase.done);
     } catch (e) {
@@ -186,7 +212,11 @@ class _FirmwareUpdateScreenState extends State<FirmwareUpdateScreen> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Installing… ${(_progress * 100).toStringAsFixed(0)}%',
+            Text(
+                _attempt > 0
+                    ? 'Connection dropped, trying again (${_attempt + 1}/3)… '
+                        '${(_progress * 100).toStringAsFixed(0)}%'
+                    : 'Installing… ${(_progress * 100).toStringAsFixed(0)}%',
                 style: const TextStyle(
                     color: AppTheme.textPrimary,
                     fontSize: 16,
