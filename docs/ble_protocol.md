@@ -160,9 +160,11 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 | Property | Value |
 |----------|-------|
 | UUID | `12345678-1234-5678-1234-56789abcdefd` |
-| Properties | Read, Write |
+| Properties | Read, Write, Write Without Response (1.7+) |
 | Data Format | write `[1, theme, number style]` (style optional; 1.5 takes `[1, theme]`); read `[1, theme, theme count, number style, style count]` (1.5 reads back only the first 3) |
 | Description | Rep screen theme: 0 Classic, 1 Stroke, 2 Tempo, 3 Minimal. Number style of the rep count (1.6+): 0 Segment, 1 Rounded segment, 2 Bold, 3 Light. The count is centred on its ink at any digit count. Both kept in flash |
+| Read (1.7+) | `[1, theme, theme count, style, style count, flags]`, flags bit 0 = live preview |
+| Live preview (1.7+) | `[2, axis, pos u16 LE]` without response: where the app's carousel stands, pos = page × 256, axis 0 = themes, 1 = number styles. The tracker shows the rep screen with sample numbers and follows: themes slide sideways, the count slides up / down. Sent on every carousel move and every 2 s as keep-alive; the tracker leaves the preview 6 s after the last one, or at once on `[3]` |
 
 ## USB Test Mode (no Bluetooth — emulator testing)
 

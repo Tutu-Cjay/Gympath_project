@@ -24,7 +24,9 @@
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
-#define SPI_FREQUENCY  40000000
+// 80 MHz (Waveshare: the panel runs at up to 80 MHz): a full frame in
+// ~12 ms, so the live preview slides smoothly.
+#define SPI_FREQUENCY  80000000
 #define SPI_READ_FREQUENCY 20000000
 
 // No touch panel on this board: silence the library's TOUCH_CS warning.

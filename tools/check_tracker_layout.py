@@ -167,6 +167,20 @@ for name0,items0 in screens.items():
             if b[0]<o[2] and o[0]<b[2] and b[1]<o[3] and o[1]<b[3]: print(name,'overlap',s); bad+=1
         bx.append(b)
 
+# live preview: the count slides up / down inside the union of its boxes in
+# every style (firmware countWindow, sample count "12"); nothing else may be
+# inside that window or it would slide too
+for name,items in screens.items():
+    if not name.startswith('theme '): continue
+    cnt=[(y,s) for f,y,s in items if f=='COUNT'][0]
+    bx=[count_layout(st,'12',cnt[1],cnt[0])[2] for st in range(len(NUM_STYLES))]
+    win=(min(b[0] for b in bx)-1,min(b[1] for b in bx)-1,max(b[2] for b in bx)+1,max(b[3] for b in bx)+1)
+    for f,y,s in items:
+        if f=='COUNT': continue
+        fo=F[f]; w=V.width(fo,s); b=(120-w//2,y-fo['H']//2,120-w//2+w,y-fo['H']//2+fo['H'])
+        if b[0]<win[2] and win[0]<b[2] and b[1]<win[3] and win[1]<b[3]:
+            print(name,'preview window',win,'takes in',s); bad+=1
+
 
 def preview(path):
     """A picture of the dashboard with example numbers (needs Pillow)."""

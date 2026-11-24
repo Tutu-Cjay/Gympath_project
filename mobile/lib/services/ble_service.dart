@@ -91,6 +91,11 @@ class BleService {
   /// The rep count's number style (firmware 1.6+); null when unknown or not
   /// supported.
   final ValueNotifier<int?> trackerDigits = ValueNotifier<int?>(null);
+
+  /// The tracker follows the app's carousels live (firmware 1.7+).
+  final ValueNotifier<bool> trackerLivePreview = ValueNotifier<bool>(false);
+  bool _previewBusy = false;
+  List<int>? _previewNext;
   StreamSubscription<List<int>>? _batterySub;
 
   BluetoothDevice? _device;
@@ -471,6 +476,48 @@ class BleService {
     final ok = v.length >= 2 && v[0] == 1;
     trackerTheme.value = ok ? v[1] : null;
     trackerDigits.value = ok && v.length >= 5 ? v[3] : null;
+    trackerLivePreview.value = ok && v.length >= 6 && (v[5] & 1) != 0;
+  }
+
+  /// Live preview packet: [2, axis, page × 256 as u16 LE]; axis 0 = themes,
+  /// 1 = number styles.
+  static List<int> previewPacket(int axis, double page) {
+    final v = (page * 256).round().clamp(0, 65535);
+    return [2, axis, v & 0xFF, v >> 8];
+  }
+
+  /// Where a carousel stands, for the tracker to follow (firmware 1.7+).
+  /// Sent without response; while one is on its way only the newest
+  /// position waits, so the tracker never lags behind a queue.
+  Future<void> sendPreview(int axis, double page) async {
+    final c = _settingsChar;
+    if (c == null || !trackerLivePreview.value) return;
+    _previewNext = previewPacket(axis, page);
+    if (_previewBusy) return;
+    _previewBusy = true;
+    try {
+      while (_previewNext != null) {
+        final p = _previewNext!;
+        _previewNext = null;
+        try {
+          await c.write(p, withoutResponse: true);
+        } catch (_) {
+          break;
+        }
+      }
+    } finally {
+      _previewBusy = false;
+    }
+  }
+
+  /// The carousels are closed: the tracker goes back to its own screen.
+  Future<void> endPreview() async {
+    _previewNext = null;
+    final c = _settingsChar;
+    if (c == null || !trackerLivePreview.value) return;
+    try {
+      await c.write([3], withoutResponse: true);
+    } catch (_) {}
   }
 
   /// The settings packet the tracker takes.
@@ -504,6 +551,8 @@ class BleService {
     _settingsChar = null;
     trackerTheme.value = null;
     trackerDigits.value = null;
+    trackerLivePreview.value = false;
+    _previewNext = null;
   }
 
   /// Send today's numbers to the tracker's idle screen.

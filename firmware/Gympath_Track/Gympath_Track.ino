@@ -24,6 +24,10 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.7.0: live preview while choosing in the app: the tracker shows the rep
+ * screen and follows the app's carousels in real time, themes sliding
+ * sideways and the count sliding up / down (pages rendered into PSRAM,
+ * panel SPI at 80 MHz for smooth motion).
  * 1.6.0: number styles for the rep count, chosen in the app: Segment,
  * Rounded segment, Bold and Light, on every theme. The count always sits
  * centred whatever its number of digits (4 digits drop to a smaller size).
@@ -87,10 +91,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.6.0"     // bump on every release; the app compares it
+#define FW_VERSION   "1.7.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-15"
+#define FW_BUILD     "TRACK-1D-16"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -105,6 +109,25 @@
 QMI8658 imu;
 QMI8658_Data imuData;
 TFT_eSPI tft;
+// Where the drawing helpers draw: the panel, or an off-screen page (the live
+// theme preview renders rep screens into PSRAM and slides them).
+TFT_eSPI*    gfx = &tft;
+TFT_eSprite* gfxPage = nullptr;   // set while gfx is an off-screen page
+
+// Types used in function parameters live up here: the Arduino build puts
+// its generated prototypes before the first function.
+// What a rep screen shows: live values during a set, sample ones in the
+// app's preview.
+struct RepIn {
+  int      reps;
+  float    frac;          // Stroke: travel of the current stroke
+  int8_t   phase;         // +1 lifting, −1 lowering, 0 holding
+  uint32_t upMs, downMs;  // Tempo: last rep
+  uint16_t speedCol;      // Classic: ring colour
+  uint8_t  style;         // number style
+};
+// A rendered rep screen in PSRAM (live preview).
+struct PageSlot { TFT_eSprite* spr; int8_t th, st; uint32_t used; };
 
 /* ================= BLE ================= */
 #define SERVICE_UUID     "12345678-1234-5678-1234-56789abcdef0"
@@ -704,12 +727,12 @@ void segRect(int k, int x, int y, int s, int& rx, int& ry, int& rw, int& rh) {
 void fillSegment(int k, int x, int y, int s, uint16_t c, bool round) {
   int rx, ry, rw, rh;
   segRect(k, x, y, s, rx, ry, rw, rh);
-  if (c == TFT_BLACK) { tft.fillRect(rx, ry, rw, rh, c); return; }
+  if (c == TFT_BLACK) { gfx->fillRect(rx, ry, rw, rh, c); return; }
   if (round) {               // a hair of gap along the bar so ends stay round
     if (k == 0 || k == 3 || k == 6) { rx += 1; rw -= 2; } else { ry += 1; rh -= 2; }
   }
-  if (!round) tft.fillRect(rx, ry, rw, rh, c);
-  else tft.fillSmoothRoundRect(rx, ry, rw, rh, s / 2, c, TFT_BLACK);
+  if (!round) gfx->fillRect(rx, ry, rw, rh, c);
+  else gfx->fillSmoothRoundRect(rx, ry, rw, rh, s / 2, c, TFT_BLACK);
 }
 
 void segBox(int len, int s, int cx, int cy, int& x, int& y, int& w, int& h) {
@@ -747,7 +770,7 @@ void countClear() {
     segDigits(cv.shown, cv.s, cv.cx, cv.cy, TFT_BLACK, false);
   } else if (cv.font) {
     int w = textW(*cv.font, cv.shown), h = textH(*cv.font);
-    tft.fillRect(cv.cx - w / 2, cv.cy - h / 2, w, h, TFT_BLACK);
+    gfx->fillRect(cv.cx - w / 2, cv.cy - h / 2, w, h, TFT_BLACK);
   }
   cv.shown[0] = 0;
 }
@@ -768,12 +791,11 @@ int fontInkShift(const SPFont& f, const char* str) {
   return (inkL + inkR) / 2 - W / 2;
 }
 
-void drawCount(int n, int cx, int cy, bool large, uint16_t c) {
+void drawCount(int n, int cx, int cy, bool large, uint16_t c, uint8_t style) {
   char str[8];
   snprintf(str, sizeof str, "%d", n < 0 ? 0 : n);
   int len = strlen(str);
   bool many = len >= 4;
-  uint8_t style = numStyle;
   if (style <= 1) {
     int s = large ? (many ? 4 : 6) : (many ? 2 : 3);
     int ecx = cx - segInkShift(str, s);
@@ -882,10 +904,18 @@ void drawText(const SPFont& f, const char* s, int cx, int cy, uint16_t fg,
     }
     pen += g->adv;
   }
-  bool swap = tft.getSwapBytes();
-  tft.setSwapBytes(true);
-  tft.pushImage(x0, y0, bw, H, buf);
-  tft.setSwapBytes(swap);
+  // pushImage is not virtual: call the page's own when drawing off-screen
+  if (gfxPage) {
+    bool swap = gfxPage->getSwapBytes();
+    gfxPage->setSwapBytes(true);
+    gfxPage->pushImage(x0, y0, bw, H, buf);
+    gfxPage->setSwapBytes(swap);
+  } else {
+    bool swap = tft.getSwapBytes();
+    tft.setSwapBytes(true);
+    tft.pushImage(x0, y0, bw, H, buf);
+    tft.setSwapBytes(swap);
+  }
   free(buf);
 }
 
@@ -940,8 +970,8 @@ uint32_t ringEnd(float frac) {
 void ringDelta(int r, int ir, uint32_t& shown, uint32_t now, uint16_t fg) {
   if (now == shown) return;
   // drawArc: smooth sides, square ends, so the pieces join without a seam
-  if (now > shown) tft.drawArc(120, 120, r, ir, shown, now, fg, TFT_BLACK, true);
-  else tft.drawArc(120, 120, r, ir, now, shown, COL_TRACK, TFT_BLACK, true);
+  if (now > shown) gfx->drawArc(120, 120, r, ir, shown, now, fg, TFT_BLACK, true);
+  else gfx->drawArc(120, 120, r, ir, now, shown, COL_TRACK, TFT_BLACK, true);
   shown = now;
 }
 
@@ -959,7 +989,7 @@ uint16_t batLitColor = 0;
 
 void batBlock(int i, uint16_t c) {
   int bw = (BAT_W - 6 - (BAT_BLOCKS - 1)) / BAT_BLOCKS;   // 1 px gaps
-  tft.fillRect(batX + 3 + i * (bw + 1), batY + 3, bw, BAT_H - 6, c);
+  gfx->fillRect(batX + 3 + i * (bw + 1), batY + 3, bw, BAT_H - 6, c);
 }
 
 uint16_t batColor() {
@@ -995,11 +1025,11 @@ void drawBattery(int cy) {
   const int gap = 5;
   int total = BAT_W + 2 + gap + textW(FONT_TINY, txt);
   int x = 120 - total / 2;
-  if (batRight > batLeft) tft.fillRect(batLeft, cy - 8, batRight - batLeft, 17, TFT_BLACK);
+  if (batRight > batLeft) gfx->fillRect(batLeft, cy - 8, batRight - batLeft, 17, TFT_BLACK);
   batLeft = x; batRight = x + total + 1;
   batX = x; batY = cy - BAT_H / 2;
-  tft.drawSmoothRoundRect(batX, batY, 3, 2, BAT_W, BAT_H, TFT_WHITE, TFT_BLACK);
-  tft.fillSmoothRoundRect(batX + BAT_W, batY + 4, 3, 5, 1, TFT_WHITE, TFT_BLACK);
+  gfx->drawSmoothRoundRect(batX, batY, 3, 2, BAT_W, BAT_H, TFT_WHITE, TFT_BLACK);
+  gfx->fillSmoothRoundRect(batX + BAT_W, batY + 4, 3, 5, 1, TFT_WHITE, TFT_BLACK);
   batLit = 0;                          // blocks drawn fresh below
   batLitColor = c;
   drawText(FONT_TINY, txt, x + BAT_W + 2 + gap, cy, c, false, 0);
@@ -1021,10 +1051,10 @@ void updateBatteryBlocks(uint32_t ms) {
 const int DOT_Y = 196;
 void dashDot(int i, bool on, bool today) {
   int x = 120 + (i - 3) * 15;
-  tft.fillRect(x - 8, DOT_Y - 8, 17, 17, TFT_BLACK);
-  if (today) tft.drawSmoothCircle(x, DOT_Y, 7, TFT_WHITE, TFT_BLACK);
-  if (on) tft.fillSmoothCircle(x, DOT_Y, 5, COL_ORANGE, TFT_BLACK);
-  else tft.drawSmoothCircle(x, DOT_Y, 4, COL_DOT_OFF, TFT_BLACK);
+  gfx->fillRect(x - 8, DOT_Y - 8, 17, 17, TFT_BLACK);
+  if (today) gfx->drawSmoothCircle(x, DOT_Y, 7, TFT_WHITE, TFT_BLACK);
+  if (on) gfx->fillSmoothCircle(x, DOT_Y, 5, COL_ORANGE, TFT_BLACK);
+  else gfx->drawSmoothCircle(x, DOT_Y, 4, COL_DOT_OFF, TFT_BLACK);
 }
 
 void updateDashboard() {
@@ -1032,13 +1062,13 @@ void updateDashboard() {
   bool synced = dayValid;
   if (dv.valid && dv.synced != synced) dv.valid = false;   // layout changes
   if (!dv.valid) {
-    tft.fillScreen(TFT_BLACK);
+    gfx->fillScreen(TFT_BLACK);
     memset(&dv, 0, sizeof dv);
     dv.bat = -2;
     dv.today = -2;
     dv.ringOut = dv.ringIn = RING_A0;
-    tft.drawSmoothArc(120, 120, 118, 108, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
-    tft.drawSmoothArc(120, 120, 104, 98, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
+    gfx->drawSmoothArc(120, 120, 118, 108, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
+    gfx->drawSmoothArc(120, 120, 104, 98, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
     batLeft = batRight = 0;
     dv.valid = true;
     dv.synced = synced;
@@ -1076,7 +1106,7 @@ void updateDashboard() {
   bool connected = bleServer && bleServer->getConnectedCount() > 0;
   if (connected != dv.connected || !dv.linkDrawn) {
     // app link: a dot at the top, between the rings' ends
-    tft.fillSmoothCircle(120, 30, 3, connected ? COL_GREEN : COL_DOT_OFF, TFT_BLACK);
+    gfx->fillSmoothCircle(120, 30, 3, connected ? COL_GREEN : COL_DOT_OFF, TFT_BLACK);
     dv.connected = connected;
     dv.linkDrawn = true;
   }
@@ -1142,11 +1172,11 @@ void themeFresh(uint8_t th) {
   rv.ringEnd = RING_A0;
   switch (th) {
     case 1:   // Stroke: an open ring that fills with the stack's travel
-      tft.drawSmoothArc(120, 120, 118, 104, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
+      gfx->drawSmoothArc(120, 120, 118, 104, RING_A0, RING_A0 + RING_SPAN, COL_TRACK, TFT_BLACK, true);
       say(FONT_SMALL, "reps", 120, 150, COL_MUTED);
       break;
     case 2:   // Tempo: a thin ring in the phase colour
-      tft.drawSmoothArc(120, 120, 118, 112, 0, 360, COL_TRACK, TFT_BLACK, false);
+      gfx->drawSmoothArc(120, 120, 118, 112, 0, 360, COL_TRACK, TFT_BLACK, false);
       rv.ringCol = COL_TRACK;
       say(FONT_TINY, "last rep", 120, 186, COL_MUTED);
       break;
@@ -1155,15 +1185,15 @@ void themeFresh(uint8_t th) {
   }
 }
 
-void themeStroke(int r) {
-  drawCount(r, 120, 112, false, TFT_WHITE);
-  uint32_t end = ringEnd(strokeFrac);
+void themeStroke(const RepIn& in) {
+  drawCount(in.reps, 120, 112, false, TFT_WHITE, in.style);
+  uint32_t end = ringEnd(in.frac);
   end -= (end - RING_A0) % 2;                       // 2° steps
-  uint16_t c = phaseColor(phase);
+  uint16_t c = phaseColor(in.phase);
   if (c != rv.ringCol && end > RING_A0) {           // new phase: recolour the fill
-    tft.drawArc(120, 120, 118, 104, RING_A0, end, c, TFT_BLACK, true);
+    gfx->drawArc(120, 120, 118, 104, RING_A0, end, c, TFT_BLACK, true);
     if (rv.ringEnd > end)
-      tft.drawArc(120, 120, 118, 104, end, rv.ringEnd, COL_TRACK, TFT_BLACK, true);
+      gfx->drawArc(120, 120, 118, 104, end, rv.ringEnd, COL_TRACK, TFT_BLACK, true);
     rv.ringEnd = end;
   } else {
     ringDelta(118, 104, rv.ringEnd, end, c);
@@ -1171,31 +1201,260 @@ void themeStroke(int r) {
   rv.ringCol = c;
 }
 
-void themeTempo(int r) {
-  int8_t ph = phase;
+void themeTempo(const RepIn& in) {
+  int8_t ph = in.phase;
   uint16_t c = phaseColor(ph);
   if (c != rv.ringCol) {
-    tft.drawSmoothArc(120, 120, 118, 112, 0, 360, c, TFT_BLACK, false);
+    gfx->drawSmoothArc(120, 120, 118, 112, 0, 360, c, TFT_BLACK, false);
     rv.ringCol = c;
   }
   textDelta(rv.word, sizeof rv.word, ph > 0 ? "LIFT" : ph < 0 ? "LOWER" : "HOLD", 120, 62, FONT_MED, c);
-  drawCount(r, 120, 118, false, TFT_WHITE);
+  drawCount(in.reps, 120, 118, false, TFT_WHITE, in.style);
   char line[32];
-  if (tempoUpMs || tempoDownMs)
-    snprintf(line, sizeof line, "up %.1fs  down %.1fs", tempoUpMs / 1000.0f, tempoDownMs / 1000.0f);
+  if (in.upMs || in.downMs)
+    snprintf(line, sizeof line, "up %.1fs  down %.1fs", in.upMs / 1000.0f, in.downMs / 1000.0f);
   else
     snprintf(line, sizeof line, "up -  down -");
   textDelta(rv.tempo, sizeof rv.tempo, line, 120, 166, FONT_SMALL, TFT_WHITE);
 }
 
-void themeMinimal(int r) {
-  drawCount(r, 120, 120, true, TFT_WHITE);
-  int want = r > 30 ? 30 : r;                       // one dot per rep, 12° apart
+void themeMinimal(const RepIn& in) {
+  drawCount(in.reps, 120, 120, true, TFT_WHITE, in.style);
+  int want = in.reps > 30 ? 30 : in.reps;                       // one dot per rep, 12° apart
   for (; rv.dots < want; rv.dots++) {
     float a = rv.dots * 12.0f * DEG_TO_RAD;
-    tft.fillSmoothCircle(120 + (int)roundf(108 * sinf(a)), 120 - (int)roundf(108 * cosf(a)),
+    gfx->fillSmoothCircle(120 + (int)roundf(108 * sinf(a)), 120 - (int)roundf(108 * cosf(a)),
                          4, COL_GREEN, TFT_BLACK);
   }
+}
+
+// Classic: the ring repaints only when its colour changes (one arc).
+void themeClassic(const RepIn& in, bool count) {
+  if (in.speedCol != rv.ringCol) {
+    gfx->drawSmoothArc(120, 120, 119, 105, 0, 360, in.speedCol, TFT_BLACK, false);
+    rv.ringCol = in.speedCol;
+  }
+  if (count) drawCount(in.reps, 120, 120, true, in.speedCol, in.style);
+}
+
+void themeDraw(uint8_t th, const RepIn& in) {
+  switch (th) {
+    case 1:  themeStroke(in); break;
+    case 2:  themeTempo(in); break;
+    case 3:  themeMinimal(in); break;
+    default: themeClassic(in, true); break;
+  }
+}
+
+/* ================= LIVE PREVIEW (the app's theme / number carousels) ======= */
+// While the app's Tracker screen is open it streams where its carousels
+// stand: [2, axis, pos u16 LE] on …cdefd, pos = page × 256 (axis 0 = themes,
+// 1 = number styles), and [3] when it closes. The rep screen is shown with
+// sample numbers and follows the finger: themes slide sideways, the count
+// slides up and down. Every page is rendered once into PSRAM; a frame is
+// then only copied out of two pages, so the motion runs at the panel's
+// speed (a full frame is ~12 ms at 80 MHz SPI, the count window ~3 ms).
+volatile bool     previewActive = false;
+volatile uint32_t previewMsgMs = 0;
+volatile uint8_t  previewAxis = 0;
+volatile uint16_t previewPos = 0;          // page × 256
+const uint32_t    PREVIEW_HOLD_MS = 6000;  // app keep-alive every 2 s
+
+const int PAGE_SLOTS = 8;                  // 8 × 115 KB of the 2 MB PSRAM
+PageSlot pageSlot[PAGE_SLOTS];
+int pageCount = 0;                         // slots allocated
+bool pageFull = false;                     // no more memory for slots
+
+void previewSample(RepIn& in, uint8_t style) {
+  in.reps = 12; in.frac = 0.62f; in.phase = 1;
+  in.upMs = 1200; in.downMs = 2400;
+  in.speedCol = 0x07E0;                    // mid speed: green
+  in.style = style;
+}
+
+// A rep screen with sample numbers on gfx (the panel or a page).
+void drawRepPage(uint8_t th, uint8_t style) {
+  RepIn in;
+  previewSample(in, style);
+  gfx->fillRect(0, 0, 240, 240, TFT_BLACK);
+  countReset();
+  themeFresh(th);
+  themeDraw(th, in);
+}
+
+// The cached page for (theme, style), rendering it if needed; null when
+// there is no PSRAM for it. `keep` (a slot) is never evicted.
+PageSlot* findPage(int th, int st) {
+  for (int i = 0; i < pageCount; i++)
+    if (pageSlot[i].th == th && pageSlot[i].st == st) return &pageSlot[i];
+  return nullptr;
+}
+PageSlot* getPage(int th, int st, const PageSlot* keep) {
+  PageSlot* p = findPage(th, st);
+  if (!p) {
+    if (pageCount < PAGE_SLOTS && !pageFull && psramFound()) {
+      TFT_eSprite* spr = new TFT_eSprite(&tft);
+      spr->setColorDepth(16);
+      if (spr->createSprite(240, 240)) {
+        p = &pageSlot[pageCount++];
+        p->spr = spr;
+      } else {
+        delete spr;
+        pageFull = true;
+      }
+    }
+    if (!p) {                              // reuse the least recently used
+      for (int i = 0; i < pageCount; i++)
+        if (&pageSlot[i] != keep && (!p || pageSlot[i].used < p->used)) p = &pageSlot[i];
+      if (!p) return nullptr;
+    }
+    p->th = th; p->st = st;
+    gfx = p->spr; gfxPage = p->spr;
+    drawRepPage(th, st);
+    gfx = &tft; gfxPage = nullptr;
+  }
+  p->used = millis();
+  return p;
+}
+
+// Where the count can be, for the vertical slide: the union of its boxes in
+// every style (sample count), so the window never takes in other text.
+void countWindow(uint8_t th, int& wx, int& wy, int& ww, int& wh) {
+  int cy = th == 1 ? 112 : th == 2 ? 118 : 120;
+  bool large = th == 0 || th == 3;
+  const char* str = "12";
+  int x0 = 240, y0 = 240, x1 = 0, y1 = 0;
+  for (uint8_t st = 0; st < NUM_STYLE_COUNT; st++) {
+    int x, y, w, h;
+    if (st <= 1) {
+      int sz = large ? 6 : 3;
+      segBox(strlen(str), sz, 120 - segInkShift(str, sz), cy, x, y, w, h);
+    } else {
+      const SPFont* f = st == 2 ? (large ? &NUM_BOLD_L : &FONT_BIG) : (large ? &NUM_LIGHT_L : &NUM_LIGHT_S);
+      w = textW(*f, str); h = textH(*f);
+      x = 120 - fontInkShift(*f, str) - w / 2; y = cy - h / 2;
+    }
+    x0 = min(x0, x); y0 = min(y0, y); x1 = max(x1, x + w); y1 = max(y1, y + h);
+  }
+  wx = max(0, x0 - 1); wy = max(0, y0 - 1);
+  ww = min(240, x1 + 1) - wx; wh = min(240, y1 + 1) - wy;
+}
+
+static uint16_t stripBuf[240 * 16];        // internal RAM: one strip on its way out
+
+void pushStrip(int x, int y, int w, int h) {
+  bool swap = tft.getSwapBytes();
+  tft.setSwapBytes(false);                 // pages hold panel byte order already
+  tft.pushImage(x, y, w, h, stripBuf);
+  tft.setSwapBytes(swap);
+}
+
+// Themes: page A moved left by `off` px, page B following on its right.
+void slideH(const uint16_t* A, const uint16_t* B, int off) {
+  for (int y0 = 0; y0 < 240; y0 += 16) {
+    for (int j = 0; j < 16; j++) {
+      uint16_t* d = stripBuf + j * 240;
+      int y = y0 + j;
+      if (off < 240) memcpy(d, A + y * 240 + off, (240 - off) * 2);
+      if (off > 0) {
+        if (B) memcpy(d + 240 - off, B + y * 240, off * 2);
+        else memset(d + 240 - off, 0, off * 2);
+      }
+    }
+    pushStrip(0, y0, 240, 16);
+  }
+}
+
+// Numbers: inside the count's window, A moved up by `off` px, B below it.
+void slideV(const uint16_t* A, const uint16_t* B, int off, int wx, int wy, int ww, int wh) {
+  int rows = (240 * 16) / ww;
+  for (int r0 = 0; r0 < wh; r0 += rows) {
+    int h = min(rows, wh - r0);
+    for (int j = 0; j < h; j++) {
+      int src = r0 + j + off;
+      const uint16_t* S = src < wh ? A + (wy + src) * 240 + wx
+                        : B ? B + (wy + src - wh) * 240 + wx : nullptr;
+      if (S) memcpy(stripBuf + j * ww, S, ww * 2);
+      else memset(stripBuf + j * ww, 0, ww * 2);
+    }
+    pushStrip(wx, wy + r0, ww, h);
+  }
+}
+
+// One preview frame. Returns true while it is moving (draw again soon).
+struct PreviewView {
+  bool   fresh;                  // nothing of the preview on the panel yet
+  int8_t axis, baseTh, baseSt;   // what is shown
+  int    a, off;
+  float  pos;                    // smoothed position, in pages
+  uint32_t lastMs;
+};
+PreviewView pvw;
+
+bool previewFrame() {
+  uint32_t now = millis();
+  uint8_t axis = previewAxis;
+  uint8_t n = axis ? NUM_STYLE_COUNT : THEME_COUNT;
+  float target = fminf(previewPos / 256.0f, n - 1);
+  int baseTh = repTheme, baseSt = numStyle;
+  // a new carousel, or the other one's setting changed: jump, redraw whole
+  bool jump = pvw.fresh || axis != pvw.axis ||
+              (axis == 0 && baseSt != pvw.baseSt) || (axis == 1 && baseTh != pvw.baseTh);
+  if (jump) {
+    pvw.pos = target;
+  } else {                       // follow the finger smoothly between packets
+    float dt = (now - pvw.lastMs) / 1000.0f;
+    float k = 1.0f - expf(-dt / 0.035f);
+    pvw.pos += (target - pvw.pos) * k;
+    if (fabsf(target - pvw.pos) < 0.002f) pvw.pos = target;
+  }
+  pvw.lastMs = now;
+  int a = (int)floorf(pvw.pos);
+  if (a < 0) a = 0;
+  if (a > n - 1) a = n - 1;
+  float frac = a >= n - 1 ? 0 : pvw.pos - a;
+
+  PageSlot* pa = axis ? getPage(baseTh, a, nullptr) : getPage(a, baseSt, nullptr);
+  if (!pa) {                     // no PSRAM: no slide, show the nearest page
+    int nearest = (int)roundf(pvw.pos);
+    if (jump || nearest != pvw.a) {
+      if (axis) drawRepPage(baseTh, nearest); else drawRepPage(nearest, baseSt);
+      pvw.a = nearest;
+    }
+    pvw.fresh = false; pvw.axis = axis; pvw.baseTh = baseTh; pvw.baseSt = baseSt;
+    return false;
+  }
+  PageSlot* pb = nullptr;
+  if (frac > 0) pb = axis ? getPage(baseTh, a + 1, pa) : getPage(a + 1, baseSt, pa);
+  const uint16_t* A = (const uint16_t*)pa->spr->getPointer();
+  const uint16_t* B = pb ? (const uint16_t*)pb->spr->getPointer() : nullptr;
+
+  int wx = 0, wy = 0, ww = 240, wh = 240;
+  if (axis) countWindow(baseTh, wx, wy, ww, wh);
+  int off = (int)roundf(frac * (axis ? wh : 240));
+  bool moved = jump || a != pvw.a || off != pvw.off;
+  if (moved) {
+    if (axis == 0) slideH(A, B, off);
+    else {
+      if (jump) slideH(A, nullptr, 0);   // the rest of the screen, once
+      slideV(A, B, off, wx, wy, ww, wh);
+    }
+  }
+  pvw.fresh = false; pvw.axis = axis; pvw.baseTh = baseTh; pvw.baseSt = baseSt;
+  pvw.a = a; pvw.off = off;
+  if (!moved && pvw.pos == target) {
+    // still: get the neighbours ready so the next swipe starts at once
+    const int want[2] = {a + 1, a - 1};
+    for (int i : want) {
+      if (i < 0 || i >= n) continue;
+      bool cached = axis ? findPage(baseTh, i) : findPage(i, baseSt);
+      if (!cached && (pageCount < PAGE_SLOTS && !pageFull)) {
+        if (axis) getPage(baseTh, i, pa); else getPage(i, baseSt, pa);
+        break;                   // one per frame
+      }
+    }
+  }
+  return moved || pvw.pos != target;
 }
 
 void displayTask(void*) {
@@ -1204,12 +1463,13 @@ void displayTask(void*) {
   uint16_t ringColor = 0;       // colour of the outer ring now
   int      lastPct = -1;        // OTA screens: −1 none, −2 failed, −3 sensor
   bool     dashOn = false;
+  bool     previewShown = false;
   for (;;) {
     bool otaScreen = otaState == OTA_RECEIVING || otaState == OTA_DONE ||
                      (otaState == OTA_ERROR && sinceMs(otaErrorMs) < 3000);
     // leaving the dashboard (a set, an update, an error): clear its rings
     if (dashOn && (state != ST_IDLE || testMode || !imuOk || otaScreen)) {
-      tft.fillScreen(TFT_BLACK);
+      gfx->fillScreen(TFT_BLACK);
       dashOn = false;
       shownState = 0xFF;
       ringColor = 0;
@@ -1221,7 +1481,7 @@ void displayTask(void*) {
       int pct = otaSize ? (int)((uint64_t)otaWritten * 100 / otaSize) : 0;
       if (os == OTA_DONE) pct = 100;
       if (pct != lastPct) {
-        if (lastPct < 0) tft.fillCircle(120, 120, 104, TFT_BLACK);
+        if (lastPct < 0) gfx->fillCircle(120, 120, 104, TFT_BLACK);
         static char pctShown[8] = "";
         if (lastPct < 0) pctShown[0] = 0;
         say(FONT_MED, os == OTA_DONE ? "RESTART" : "UPDATE", 120, 100, TFT_WHITE);
@@ -1230,24 +1490,42 @@ void displayTask(void*) {
         textDelta(pctShown, sizeof pctShown, ptxt, 120, 138, FONT_MED, TFT_WHITE);
         lastPct = pct;
         shownState = 0xFF;   // status screen redraws when the update ends
+        previewShown = false;
       }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     if (os == OTA_ERROR && sinceMs(otaErrorMs) < 3000) {
       if (lastPct != -2) {
-        tft.fillCircle(120, 120, 104, TFT_BLACK);
+        gfx->fillCircle(120, 120, 104, TFT_BLACK);
         say(FONT_MED, "UPDATE", 120, 100, TFT_RED);
         say(FONT_MED, "FAILED", 120, 138, TFT_RED);
         lastPct = -2;
         shownState = 0xFF;
+        previewShown = false;
       }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    // the app's theme / number carousels: the rep screen follows the finger
+    bool pv = previewActive && sinceMs(previewMsgMs) < PREVIEW_HOLD_MS;
+    if (pv) {
+      if (!previewShown) { pvw.fresh = true; previewShown = true; dashOn = false; }
+      bool moving = previewFrame();
+      vTaskDelay(moving ? 1 : pdMS_TO_TICKS(15));
+      continue;
+    }
+    if (previewShown) {             // back to what the tracker was showing
+      previewShown = false;
+      previewActive = false;
+      tft.fillScreen(TFT_BLACK);
+      shownState = 0xFF;
+      ringColor = 0;
+      lastPct = -1;
+    }
     if (!imuOk) {
       if (lastPct != -3) {
-        tft.fillCircle(120, 120, 104, TFT_BLACK);
+        gfx->fillCircle(120, 120, 104, TFT_BLACK);
         say(FONT_MED, "SENSOR", 120, 100, TFT_RED);
         say(FONT_MED, "ERROR", 120, 138, TFT_RED);
         lastPct = -3;
@@ -1256,7 +1534,7 @@ void displayTask(void*) {
       continue;
     }
     if (lastPct != -1) {            // an update screen just ended
-      tft.fillScreen(TFT_BLACK);
+      gfx->fillScreen(TFT_BLACK);
       lastPct = -1;
       shownState = 0xFF;
       ringColor = 0;
@@ -1279,7 +1557,7 @@ void displayTask(void*) {
     uint8_t R = t < 0.5f ? 0 : (uint8_t)((t - 0.5f) * 2 * 255);
     uint8_t G = t < 0.5f ? (uint8_t)(t * 2 * 255) : (uint8_t)((1 - (t - 0.5f) * 2) * 255);
     uint8_t B = t < 0.5f ? (uint8_t)((1 - t * 2) * 255) : 0;
-    uint16_t color = st == ST_TRACK ? tft.color565(R, G, B) : 0x5E89;
+    uint16_t color = st == ST_TRACK ? gfx->color565(R, G, B) : 0x5E89;
 
     // a different status screen (or theme): clear once, draw its text
     static uint16_t shownTheme = 0xFFFF;
@@ -1288,7 +1566,7 @@ void displayTask(void*) {
     bool themed = st == ST_TRACK && repTheme != 0;
     if (st != shownState || tm != shownTest || themeVersion != shownTheme ||
         (themed && r < lastReps)) {                 // count reset: start over
-      tft.fillScreen(TFT_BLACK);
+      gfx->fillScreen(TFT_BLACK);
       countReset();
       shownTheme = themeVersion;
       if (st == ST_TRACK) themeFresh(repTheme);
@@ -1316,22 +1594,19 @@ void displayTask(void*) {
       ringColor = 0;
     }
     lastReps = r;
+    RepIn in = {r, strokeFrac, phase, tempoUpMs, tempoDownMs, color, numStyle};
     if (themed) {
-      switch (repTheme) {
-        case 1: themeStroke(r); break;
-        case 2: themeTempo(r); break;
-        case 3: themeMinimal(r); break;
-      }
+      themeDraw(repTheme, in);
       vTaskDelay(pdMS_TO_TICKS(40));
       continue;
     }
     // Classic: the ring repaints only when its colour changes (one arc)
     if (color != ringColor) {
-      tft.drawSmoothArc(120, 120, 119, 105, 0, 360, color, TFT_BLACK, false);
+      gfx->drawSmoothArc(120, 120, 119, 105, 0, 360, color, TFT_BLACK, false);
       ringColor = color;
     }
     // the rep count changes only the segments that switch
-    if (st == ST_TRACK) drawCount(r, 120, 120, true, color);
+    if (st == ST_TRACK) drawCount(r, 120, 120, true, color, numStyle);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -1428,17 +1703,28 @@ class DayCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 // …cdefd: [1, theme, number style] from the app (style optional, older
-// apps send 2 bytes); reads back [1, theme, theme count, style, style count].
+// apps send 2 bytes); reads back [1, theme, theme count, style, style count,
+// flags] (flags bit 0: live preview). Live preview: [2, axis, pos u16 LE]
+// (write without response, the app's carousel position) and [3] (closed).
 NimBLECharacteristic* setChar = nullptr;
 void setValueOfSettings() {
   if (!setChar) return;
-  uint8_t b[5] = {1, repTheme, THEME_COUNT, numStyle, NUM_STYLE_COUNT};
-  setChar->setValue(b, 5);
+  uint8_t b[6] = {1, repTheme, THEME_COUNT, numStyle, NUM_STYLE_COUNT, 1};
+  setChar->setValue(b, 6);
 }
 class SettingsCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
     NimBLEAttValue val = c->getValue();
-    if (val.length() < 2 || val.data()[0] != 1) { setValueOfSettings(); return; }
+    const uint8_t* d = val.data();
+    if (val.length() >= 4 && d[0] == 2) {          // carousel position
+      previewAxis = d[1] ? 1 : 0;
+      previewPos = d[2] | (d[3] << 8);
+      previewMsgMs = millis();
+      previewActive = true;
+      return;
+    }
+    if (val.length() >= 1 && d[0] == 3) { previewActive = false; return; }
+    if (val.length() < 2 || d[0] != 1) { setValueOfSettings(); return; }
     uint8_t t = val.data()[1];
     if (t < THEME_COUNT && t != repTheme) {
       repTheme = t;
@@ -1489,7 +1775,7 @@ void setupBLE() {
                  NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   dayChar->setCallbacks(new DayCallbacks());
   setChar    = s->createCharacteristic(SET_CHAR_UUID,
-                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   setChar->setCallbacks(new SettingsCallbacks());
   setValueOfSettings();
   s->start();

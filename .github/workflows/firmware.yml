@@ -28,7 +28,7 @@ concurrency:
 env:
   # Same toolchain as the README (and the Waveshare board docs).
   ESP32_CORE: "2.0.12"
-  FQBN: esp32:esp32:esp32s3
+  FQBN: esp32:esp32:esp32s3:PSRAM=enabled   # ESP32-S3R2: 2 MB quad PSRAM (live preview pages)
   LIBS: "NimBLE-Arduino@2.3.7 TFT_eSPI@2.5.43 QMI8658"
 
 jobs:

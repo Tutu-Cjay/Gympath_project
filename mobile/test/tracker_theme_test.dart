@@ -23,4 +23,11 @@ void main() {
     expect(BleService.settingsPacket(2, null), [1, 2]);
     expect(BleService.settingsPacket(2, 3), [1, 2, 3]);
   });
+
+  test('live preview packet: axis and page × 256, little endian', () {
+    expect(BleService.previewPacket(0, 0), [2, 0, 0, 0]);
+    expect(BleService.previewPacket(1, 2.5), [2, 1, 128, 2]);
+    expect(BleService.previewPacket(0, 3), [2, 0, 0, 3]);
+    expect(BleService.previewPacket(0, -0.2), [2, 0, 0, 0]); // overscroll
+  });
 }
