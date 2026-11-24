@@ -24,6 +24,13 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.4.0: more accurate positions: rest is only accepted when the tracked
+ * speed is low too (smooth mid-stroke motion no longer reads as rest);
+ * drift is removed at every rest (back-correction of the movement) and at
+ * every bottom of back-to-back reps; the old velocity leak (which shrank
+ * long, slow strokes) is gone. In simulation (tools/track_sim.py): range
+ * error 10-18 % → 1-4 %, lifting speed 5-8 % → <1 %, resting drift after
+ * 10 reps ~1 m → 0.
  * 1.3.2: greys tinted towards the accents: deep blue-slate ring tracks,
  * green-grey clock, blue-grey secondary text and empty week dots.
  * 1.3.1: updates no longer fail at a random point: the stall check compared
@@ -73,10 +80,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.3.2"     // bump on every release; the app compares it
+#define FW_VERSION   "1.4.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-12"
+#define FW_BUILD     "TRACK-1D-13"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -177,8 +184,17 @@ const float    ZUPT_GYRO_TH     = 0.08f;  // rad/s … and |ω| below this …
 const float    ZUPT_TIME_S      = 0.08f;  // … for this long → device is still
 
 const float    ACC_LPF          = 0.35f;  // EMA weight of the new sample
-const float    ACC_DEADBAND     = 0.04f;  // m/s²  ignore residual bias
-const float    VEL_LEAK         = 0.30f;  // 1/s   light drift damping
+const float    ACC_DEADBAND     = 0.0f;   // m/s²  (drift is corrected at rest now)
+const float    VEL_LEAK         = 0.02f;  // 1/s   only a whisper of damping
+// Rest is only believed when the tracked speed is low too: at constant
+// speed mid-stroke the sensors are as quiet as at rest.
+const float    ZUPT_MAX_V       = 0.12f;  // m/s
+const float    ZUPT_LONG_S      = 1.5f;   // s  quiet this long → rest anyway
+// Drift correction (tools/track_sim.py measures it):
+const float    MAX_SEG_S        = 8.0f;   // s  longer movements: no back-correction
+const float    HOME_SNAP        = 0.03f;  // m  at rest this close to the start → on the pile
+const float    BOTTOM_SNAP      = 0.06f;  // m  back-to-back reps: bottoms this close …
+const float    BOTTOM_GAIN      = 0.5f;   //    … are pulled halfway to the last one
 const float    AXIS_REALIGN     = 0.02f;  // per still sample, pull up-axis to accel
 const float    BIAS_REFINE      = 0.002f; // per still sample, refine gyro bias
 
@@ -205,6 +221,10 @@ float gBias[3] = {0, 0, 0};   // rad/s
 float aF = 0, v = 0, p = 0, accEnv = 0;
 float stillT = 0;
 bool  zupt = false;
+float segT = 0;          // s moving since the last rest or bottom
+float vAtStill = 0;      // velocity when the sensors went quiet
+float lastBottom = 0;    // where the last stroke started (m)
+const float home = 0;    // the resting height the set started from
 
 // Rep counter (direction agnostic, position based): one rep = the stack
 // travels ≥ REP_MIN_DISP from where the movement started and comes back
@@ -358,6 +378,7 @@ void resetReps() {
 void resetMotion() {
   aF = v = p = accEnv = 0;
   stillT = 0; zupt = false;
+  segT = 0; vAtStill = 0; lastBottom = 0;
   resetReps();
 }
 
@@ -378,7 +399,7 @@ void applyCommand(uint8_t cmd, uint32_t now) {
   switch (cmd) {
     case CMD_START: beginCalibration(now); break;
     case CMD_STOP:  state = ST_IDLE; resetMotion(); break;
-    case CMD_ZERO:  if (state == ST_TRACK) { p = 0; v = 0; resetReps(); }
+    case CMD_ZERO:  if (state == ST_TRACK) { p = 0; v = 0; segT = 0; lastBottom = 0; resetReps(); }
                     break;
   }
 }
@@ -513,9 +534,14 @@ void trackStep(const float a[3], float w[3], float dt) {
   float wm  = sqrtf(dot3(w, w));
 
   // ---- ZUPT: still → velocity is exactly zero ----
-  if (fabsf(mag - gMag) < ZUPT_ACC_TH && wm < ZUPT_GYRO_TH) stillT += dt;
-  else stillT = 0;
-  zupt = stillT > ZUPT_TIME_S;
+  bool wasZupt = zupt;
+  if (fabsf(mag - gMag) < ZUPT_ACC_TH && wm < ZUPT_GYRO_TH) {
+    if (stillT == 0) vAtStill = v;     // speed when it went quiet
+    stillT += dt;
+  } else {
+    stillT = 0;
+  }
+  zupt = stillT > ZUPT_TIME_S && (fabsf(v) < ZUPT_MAX_V || stillT > ZUPT_LONG_S);
 
   // ---- project onto the gravity axis ----
   float aUp = dot3(a, up) - gMag;
@@ -524,7 +550,16 @@ void trackStep(const float a[3], float w[3], float dt) {
   accEnv = 0.9f * accEnv + 0.1f * fabsf(aF);
 
   if (zupt) {
+    if (!wasZupt) {
+      // The movement that just ended began and ended at rest, so the speed
+      // left over is drift; it grew about evenly, so the position is off by
+      // half its area (plus what it added while going quiet).
+      if (segT > 0 && segT < MAX_SEG_S) p -= vAtStill * segT * 0.5f + v * ZUPT_TIME_S;
+      if (fabsf(p - home) < HOME_SNAP) p = home;   // back on the pile
+    }
     v = 0;
+    segT = 0;
+    lastBottom = p;
     // while still, gently re-anchor the axis and gyro bias to reality
     float an[3] = {a[0], a[1], a[2]};
     norm3(an);
@@ -535,8 +570,22 @@ void trackStep(const float a[3], float w[3], float dt) {
     norm3(up);
     gMag += 0.01f * (mag - gMag);
   } else {
+    float vBefore = v;
     v += aUse * dt;
     v *= expf(-VEL_LEAK * dt);
+    segT += dt;
+    if (vBefore < 0 && v >= 0 && segT > 0.3f) {
+      // Bottom of a stroke with no rest (reps back to back): the stack comes
+      // back to about where the last stroke started, so most of the gap is
+      // drift, and so is the speed error that built it up since then.
+      float e = p - lastBottom;
+      if (fabsf(e) < BOTTOM_SNAP) {
+        p -= BOTTOM_GAIN * e;
+        v -= BOTTOM_GAIN * 2.0f * e / segT;
+      }
+      lastBottom = p;
+      segT = 0;
+    }
   }
   p += v * dt;
   vNow = v;
