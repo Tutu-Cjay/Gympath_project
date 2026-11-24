@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'theme/app_theme.dart';
 import 'services/api_service.dart';
 import 'services/avatar_store.dart';
+import 'services/device_day_sync.dart';
 import 'services/routine_store.dart';
 import 'services/workout_store.dart';
 import 'screens/connect_device_screen.dart';
@@ -16,6 +17,7 @@ Future<void> main() async {
   await AvatarStore.instance.load();
   await RoutineStore.instance.load();
   await ApiService.instance.load();
+  DeviceDaySync.instance.start();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,

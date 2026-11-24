@@ -63,17 +63,23 @@ class BleStatusChip extends StatelessWidget {
                 SizedBox(width: Responsive.w(context, 6)),
                 // When connected, append the live packet count so data flow is
                 // visible at a glance (climbs ~50/s while the device streams).
-                ValueListenableBuilder<int>(
+                // The tracker's battery (firmware 1.2+) takes its place.
+                ValueListenableBuilder<int?>(
+                  valueListenable: BleService.instance.batteryPercent,
+                  builder: (context, battery, _) => ValueListenableBuilder<int>(
                   valueListenable: BleService.instance.packetCount,
                   builder: (context, pkts, _) => Text(
-                    state == BleConnectionState.connected && pkts > 0
-                        ? '$label · $pkts'
-                        : label,
+                    state == BleConnectionState.connected && battery != null
+                        ? '$label · $battery%'
+                        : state == BleConnectionState.connected && pkts > 0
+                            ? '$label · $pkts'
+                            : label,
                     style: TextStyle(
                       color: color,
                       fontSize: Responsive.sp(context, 12),
                       fontWeight: FontWeight.w600,
                     ),
+                  ),
                   ),
                 ),
               ],

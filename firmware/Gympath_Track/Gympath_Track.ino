@@ -24,6 +24,11 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.2.0: when no set is running the screen shows today at a glance: reps
+ * against the daily goal and muscles worked as rings, sets, weight lifted,
+ * this week's training days and week streak, the clock, and the battery
+ * level (also readable by the app on …cdef5). The app sends the day's
+ * numbers (…cdefc); the last ones are kept across restarts.
  * 1.1.1: calibration no longer reports MOVED on a still tracker: it judges
  * stillness by how much the readings vary, so the gyro's zero offset is
  * measured instead of treated as movement; when it does fail, the screen
@@ -40,12 +45,13 @@
 #include <NimBLEDevice.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <Preferences.h>
 #include <math.h>
 
-#define FW_VERSION   "1.1.1"     // bump on every release; the app compares it
+#define FW_VERSION   "1.2.0"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-3"
+#define FW_BUILD     "TRACK-1D-4"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -70,6 +76,8 @@ TFT_eSPI tft;
 #define TRACK_CHAR_UUID  "12345678-1234-5678-1234-56789abcdef9"  // device → app
 #define OTA_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefa"  // firmware update
 #define VER_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefb"  // FW_VERSION
+#define BAT_CHAR_UUID    "12345678-1234-5678-1234-56789abcdef5"  // battery %
+#define DAY_CHAR_UUID    "12345678-1234-5678-1234-56789abcdefc"  // app → day summary
 
 // OTA over BLE (written to …cdefa, with response = flow control):
 //   BEGIN [1, size u32 LE, md5 16 B]   DATA [2, bytes…]   END [3]   ABORT [4]
@@ -113,6 +121,8 @@ NimBLECharacteristic* repChar = nullptr;
 NimBLECharacteristic* velChar = nullptr;
 NimBLECharacteristic* ctrlChar = nullptr;
 NimBLECharacteristic* trackChar = nullptr;
+NimBLECharacteristic* batChar = nullptr;
+NimBLECharacteristic* dayChar = nullptr;
 NimBLECharacteristic* otaChar = nullptr;
 NimBLECharacteristic* verChar = nullptr;
 
@@ -190,6 +200,59 @@ volatile bool testMode = false;   // USB test link active
 uint32_t lastTestMs = 0;
 char     serBuf[32];
 uint8_t  serLen = 0;
+
+/* ================= DAY SUMMARY + BATTERY ================= */
+// What the app sends to …cdefc after connecting and after every saved set.
+// Little endian. localEpoch is the phone's local time (UTC + its offset), so
+// days and the clock follow the user's time zone.
+struct __attribute__((packed)) DayPacket {
+  uint8_t  ver;            // 1
+  uint32_t localEpoch;     // s
+  uint16_t reps;           // today
+  uint16_t sets;
+  uint32_t volumeKg;       // weight × reps, kg
+  uint16_t activeMin;      // time under load, minutes
+  uint16_t repGoal;        // daily rep goal
+  uint8_t  weekStreak;     // weeks in a row with enough training days
+  uint8_t  daysThisWeek;
+  uint8_t  weekGoal;       // days a week that count
+  uint8_t  weekMask;       // bit0 = Monday … bit6 = Sunday trained
+  uint8_t  musclesActive;  // muscle groups worked today
+  uint8_t  musclesTotal;
+};
+static_assert(sizeof(DayPacket) == 23, "DayPacket is 23 bytes");
+
+DayPacket         day = {};
+volatile bool     dayValid = false;     // have numbers (from the app or NVS)
+volatile bool     clockValid = false;   // the app gave the time since boot
+volatile uint32_t dayRxMs = 0;          // millis() when day.localEpoch was true
+volatile uint16_t dayVersion = 0;       // bumps on every new packet
+volatile bool     daySavePending = false;
+Preferences       prefs;
+
+// Battery: GPIO1 through a 200k/100k divider (Waveshare ESP32-S3-LCD-1.28).
+const int      BAT_PIN = 1;
+float          vbat = 0;                // smoothed, V
+volatile int   batPct = -1;             // −1 = not measured yet
+volatile bool  batPresent = true;       // false: no cell, running from USB
+volatile bool  batCharging = false;     // at the charger's top voltage
+uint32_t       lastBatMs = 0;
+
+uint32_t localNow() {
+  return day.localEpoch + (millis() - dayRxMs) / 1000;
+}
+
+// Li-ion resting voltage → %, piecewise linear.
+int batteryPercent(float v) {
+  static const float V[] = {3.30f, 3.60f, 3.69f, 3.73f, 3.77f, 3.80f, 3.84f,
+                            3.87f, 3.91f, 3.95f, 4.02f, 4.08f, 4.15f, 4.20f};
+  static const int   P[] = {0, 5, 10, 18, 28, 38, 50, 58, 66, 74, 82, 90, 96, 100};
+  if (v <= V[0]) return 0;
+  for (int i = 1; i < 14; i++) {
+    if (v <= V[i]) return P[i-1] + (int)((v - V[i-1]) / (V[i] - V[i-1]) * (P[i] - P[i-1]));
+  }
+  return 100;
+}
 
 /* ================= HELPERS ================= */
 static inline float dot3(const float a[3], const float b[3]) {
@@ -447,13 +510,157 @@ void draw7SegNumber(int n, int cx, int cy, int s, uint16_t c) {
   }
 }
 
+/* ================= IDLE DASHBOARD ================= */
+// Between sets: today at a glance. Outer ring = reps against the daily goal,
+// inner ring = muscle groups worked; battery and clock on top; sets, weight
+// and this week's days below.
+const uint16_t COL_GREEN  = 0x07F1;   // app neon green #00FF88
+const uint16_t COL_BLUE   = 0x3D9F;
+const uint16_t COL_ORANGE = 0xFC47;   // #FF8A3D
+const uint16_t COL_TRACK  = 0x2945;   // ring background
+const uint16_t COL_MUTED  = 0x8410;
+
+struct DashKey {
+  uint16_t dayVer; int8_t bat; bool batPresent, charging, connected, clock;
+  int32_t minute;
+};
+
+void drawBattery(int cx, int cy) {
+  int pct = batPct;
+  char txt[8];
+  if (!batPresent) snprintf(txt, sizeof txt, "USB");
+  else if (pct < 0) snprintf(txt, sizeof txt, "--%%");
+  else snprintf(txt, sizeof txt, "%d%%", pct);
+  uint16_t c = !batPresent || pct < 0 ? COL_MUTED
+             : pct > 50 ? COL_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
+  int w = 22, h = 11;
+  int x = cx - 30, y = cy - h / 2;
+  tft.drawRoundRect(x, y, w, h, 2, TFT_WHITE);
+  tft.fillRect(x + w, y + 3, 2, 5, TFT_WHITE);
+  if (batPresent && pct > 0) tft.fillRect(x + 2, y + 2, (w - 4) * pct / 100, h - 4, c);
+  if (batCharging) {   // little bolt
+    tft.fillTriangle(x + 12, y + 1, x + 7, y + 6, x + 11, y + 6, TFT_WHITE);
+    tft.fillTriangle(x + 10, y + 5, x + 14, y + 5, x + 9, y + 10, TFT_WHITE);
+  }
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(c, TFT_BLACK);
+  tft.drawString(txt, x + w + 6, cy, 2);
+}
+
+void drawRing(int r, int ir, float frac, uint16_t fg) {
+  const uint32_t a0 = 40, span = 280;               // gap at the bottom
+  tft.drawSmoothArc(120, 120, r, ir, a0, a0 + span, COL_TRACK, TFT_BLACK, true);
+  if (frac > 0.005f) {
+    uint32_t a1 = a0 + (uint32_t)(span * fminf(frac, 1.0f));
+    if (a1 <= a0 + 2) a1 = a0 + 3;
+    tft.drawSmoothArc(120, 120, r, ir, a0, a1, fg, TFT_BLACK, true);
+  }
+}
+
+void drawDashboard(const DashKey& k) {
+  static const char* DAYS[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+  tft.fillScreen(TFT_BLACK);
+
+  // Today's numbers; a new day (or week) starts them from zero.
+  uint16_t reps = 0, sets = 0, goal = 60, mAct = 0, mTot = 13;
+  uint32_t kg = 0;
+  uint8_t weekMask = 0, daysWeek = 0, weekGoal = 3, streak = 0;
+  bool stale = false;
+  if (dayValid) {
+    reps = day.reps; sets = day.sets; kg = day.volumeKg;
+    goal = day.repGoal ? day.repGoal : 60;
+    mAct = day.musclesActive; mTot = day.musclesTotal ? day.musclesTotal : 13;
+    weekMask = day.weekMask; daysWeek = day.daysThisWeek;
+    weekGoal = day.weekGoal ? day.weekGoal : 3; streak = day.weekStreak;
+    if (k.clock) {
+      uint32_t d0 = day.localEpoch / 86400, d1 = localNow() / 86400;
+      if (d1 != d0) {
+        reps = sets = mAct = 0; kg = 0; stale = true;
+        // 1 Jan 1970 was a Thursday: Monday-based week = (d + 3) / 7
+        if ((d1 + 3) / 7 != (d0 + 3) / 7) { weekMask = 0; daysWeek = 0; }
+      }
+    }
+  }
+
+  drawRing(118, 108, goal ? (float)reps / goal : 0, COL_GREEN);
+  drawRing(104, 98, mTot ? (float)mAct / mTot : 0, COL_BLUE);
+
+  drawBattery(120, 44);
+  // Bluetooth: green dot when the app is connected
+  tft.fillCircle(72, 44, 3, k.connected ? COL_GREEN : COL_TRACK);
+
+  tft.setTextDatum(MC_DATUM);
+  uint32_t t = k.clock ? localNow() : day.localEpoch;
+  uint32_t dIdx = t / 86400;
+  int wd = (int)((dIdx + 3) % 7);                   // 0 = Monday
+  char line[32];
+  if (k.clock) {
+    snprintf(line, sizeof line, "%s  %02lu:%02lu", DAYS[wd],
+             (unsigned long)(t / 3600 % 24), (unsigned long)(t / 60 % 60));
+  } else if (dayValid) {
+    snprintf(line, sizeof line, "last sync: %s", DAYS[wd]);
+  } else {
+    snprintf(line, sizeof line, "Gympath");
+  }
+  tft.setTextColor(COL_MUTED, TFT_BLACK);
+  tft.drawString(line, 120, 66, 2);
+
+  if (!dayValid) {
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("READY", 120, 112, 4);
+    tft.setTextColor(COL_MUTED, TFT_BLACK);
+    tft.drawString("open the app to sync", 120, 145, 2);
+    return;
+  }
+
+  // reps today, big
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  snprintf(line, sizeof line, "%u", reps);
+  tft.drawString(line, 120, 106, 6);
+  tft.setTextColor(COL_GREEN, TFT_BLACK);
+  snprintf(line, sizeof line, "reps / %u", goal);
+  tft.drawString(line, 120, 138, 2);
+
+  // sets · weight lifted
+  if (kg >= 1000) snprintf(line, sizeof line, "%u sets  %.1f t", sets, kg / 1000.0f);
+  else snprintf(line, sizeof line, "%u sets  %lu kg", sets, (unsigned long)kg);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(line, 120, 158, 2);
+  tft.setTextColor(COL_BLUE, TFT_BLACK);
+  snprintf(line, sizeof line, "muscles %u/%u", mAct, mTot);
+  tft.drawString(line, 120, 175, 2);
+
+  // this week: Monday … Sunday
+  for (int i = 0; i < 7; i++) {
+    int x = 120 + (i - 3) * 15, y = 196;
+    bool on = weekMask & (1 << i);
+    if (on) tft.fillCircle(x, y, 5, COL_ORANGE);
+    else tft.drawCircle(x, y, 5, COL_TRACK);
+    if (k.clock && i == wd) tft.drawCircle(x, y, 7, TFT_WHITE);
+  }
+  tft.setTextColor(daysWeek >= weekGoal ? COL_GREEN : COL_MUTED, TFT_BLACK);
+  snprintf(line, sizeof line, "%u/%u days  %u wk streak", daysWeek, weekGoal, streak);
+  tft.drawString(line, 120, 214, 1);
+  (void)stale;
+}
+
 void displayTask(void*) {
   uint8_t lastState = 0xFF;
   int lastReps = -1;
   uint16_t lastColor = 0;
   int lastPct = -1;
   bool lastTest = false;
+  static DashKey shown;
+  bool dashOn = false;
   for (;;) {
+    // leaving the dashboard (a set, an update, an error): clear its rings
+    bool otaScreen = otaState == OTA_RECEIVING || otaState == OTA_DONE ||
+                     (otaState == OTA_ERROR && millis() - otaErrorMs < 3000);
+    if (dashOn && (state != ST_IDLE || testMode || !imuOk || otaScreen)) {
+      tft.fillScreen(TFT_BLACK);
+      dashOn = false;
+      lastPct = -1;
+    }
     // firmware update screen takes over while an update is running
     uint8_t os = otaState;
     if (os == OTA_RECEIVING || os == OTA_DONE) {
@@ -497,6 +704,23 @@ void displayTask(void*) {
       continue;
     }
     lastPct = -1;
+    // between sets: the day's dashboard (redrawn when something on it changes)
+    if (state == ST_IDLE && !testMode) {
+      DashKey k;
+      memset(&k, 0, sizeof k);
+      k.dayVer = dayVersion; k.bat = (int8_t)batPct; k.batPresent = batPresent;
+      k.charging = batCharging; k.clock = clockValid;
+      k.connected = bleServer && bleServer->getConnectedCount() > 0;
+      k.minute = clockValid ? (int32_t)(localNow() / 60) : -1;
+      if (!dashOn || memcmp(&k, &shown, sizeof k) != 0) {
+        drawDashboard(k);
+        shown = k;
+        dashOn = true;
+      }
+      lastState = 0xFF;
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
     uint8_t st = state;
     int r = reps;
     // ring colour follows speed: blue (slow) → green → red (fast)
@@ -621,6 +845,20 @@ class OtaCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+// …cdefc: the app's numbers for today (DayPacket).
+class DayCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
+    NimBLEAttValue val = c->getValue();
+    if (val.length() < sizeof(DayPacket) || val.data()[0] != 1) return;
+    memcpy(&day, val.data(), sizeof(DayPacket));
+    dayRxMs = millis();
+    dayValid = true;
+    clockValid = true;
+    dayVersion = dayVersion + 1;
+    daySavePending = true;     // written to flash from loop(), not here
+  }
+};
+
 /* ================= BLE ================= */
 void setupBLE() {
   NimBLEDevice::init("Smart Tracker");
@@ -645,6 +883,13 @@ void setupBLE() {
   otaChar->setCallbacks(new OtaCallbacks());
   verChar    = s->createCharacteristic(VER_CHAR_UUID, NIMBLE_PROPERTY::READ);
   verChar->setValue(FW_VERSION);
+  batChar    = s->createCharacteristic(BAT_CHAR_UUID,
+                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  uint8_t unknown = 0xFF;      // 255 until the first reading
+  batChar->setValue(&unknown, 1);
+  dayChar    = s->createCharacteristic(DAY_CHAR_UUID,
+                 NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  dayChar->setCallbacks(new DayCallbacks());
   s->start();
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);
@@ -741,6 +986,16 @@ void setup() {
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
 
+  // the last day summary survives a restart (the clock does not)
+  prefs.begin("gympath", false);
+  DayPacket saved;
+  if (prefs.getBytes("day", &saved, sizeof saved) == sizeof saved && saved.ver == 1) {
+    day = saved;
+    dayValid = true;
+    dayVersion = 1;
+  }
+  analogSetPinAttenuation(BAT_PIN, ADC_11db);
+
   setupBLE();
 #if DEBUG_STREAM
   Serial.println("# GYMPATH TRACK fw=" FW_BUILD);
@@ -760,6 +1015,32 @@ void loop() {
 
   // new firmware verified and written → give the DONE notify time to go out
   if (otaRebootPending && now - otaDoneMs > 1500) ESP.restart();
+
+  if (daySavePending) {
+    daySavePending = false;
+    DayPacket copy = day;
+    prefs.putBytes("day", &copy, sizeof copy);
+  }
+
+  // battery every 2 s (8-sample average, smoothed)
+  if (now - lastBatMs >= 2000 || lastBatMs == 0) {
+    lastBatMs = now;
+    uint32_t mv = 0;
+    for (int i = 0; i < 8; i++) mv += analogReadMilliVolts(BAT_PIN);
+    float v = mv / 8.0f * 3.0f / 1000.0f;        // 200k/100k divider
+    vbat = vbat == 0 ? v : vbat + 0.2f * (v - vbat);
+    batPresent  = vbat > 2.5f;
+    batCharging = vbat > 4.22f;
+    int pct = batPresent ? batteryPercent(vbat) : -1;
+    if (pct != batPct) {
+      batPct = pct;
+      if (batChar) {
+        uint8_t b = pct < 0 ? 0xFF : (uint8_t)pct;
+        batChar->setValue(&b, 1);
+        if (bleServer && bleServer->getConnectedCount() > 0) batChar->notify();
+      }
+    }
+  }
 
   // running fine for 10 s with Bluetooth up: keep this image
   if (!fwConfirmed && now > 10000) {

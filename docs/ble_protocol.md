@@ -64,14 +64,14 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 | Data Format | 2 bytes: uint16 (value = kg × 10, e.g., 500 = 50.0 kg) |
 | Description | Current weight setting in kg; writable by app for display/sync |
 
-#### 5. Battery (Read)
+#### 5. Battery (Read, Notify) — `firmware/Gympath_Track` 1.2+
 
 | Property | Value |
 |----------|-------|
 | UUID | `12345678-1234-5678-1234-56789abcdef5` |
-| Properties | Read |
-| Data Format | 1 byte: uint8 (0-100, percentage) |
-| Description | Battery level in percent |
+| Properties | Read, Notify |
+| Data Format | 1 byte: uint8 (0-100, percentage); 255 = unknown / no battery (USB) |
+| Description | Battery level from GPIO1 (200k/100k divider), notified when it changes |
 
 #### 6. Device Name (Read)
 
@@ -129,6 +129,31 @@ The Smart Tracker device exposes a custom GATT service for motion data, configur
 
 > Gympath_Track also keeps …cdef1 (60 B; `az`/`velZ`/`posZ` carry the 1D values,
 > `motionCount` = reps), …cdef2 and …cdef3, so older app screens keep working.
+
+#### 12. Day Summary (Write) — `firmware/Gympath_Track` 1.2+
+
+| Property | Value |
+|----------|-------|
+| UUID | `12345678-1234-5678-1234-56789abcdefc` |
+| Properties | Write, Write Without Response |
+| Data Format | 23 bytes, little endian (firmware `DayPacket`, app `DaySummary.encode`) |
+| Description | Today's numbers for the idle screen; sent after connecting and after every saved set. Kept in flash across restarts |
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | version = 1 |
+| 1 | u32 | phone local time, s since 1970 (UTC + offset): the tracker's clock |
+| 5 | u16 | reps today |
+| 7 | u16 | sets today |
+| 9 | u32 | weight lifted today, kg (weight × reps) |
+| 13 | u16 | time under load today, min |
+| 15 | u16 | daily rep goal |
+| 17 | u8 | week streak (weeks) |
+| 18 | u8 | training days this week |
+| 19 | u8 | days a week that count |
+| 20 | u8 | this week's training days, bit 0 = Monday … bit 6 = Sunday |
+| 21 | u8 | muscle groups worked today |
+| 22 | u8 | muscle groups the exercises can train |
 
 ## USB Test Mode (no Bluetooth — emulator testing)
 

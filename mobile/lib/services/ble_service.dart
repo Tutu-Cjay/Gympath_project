@@ -66,6 +66,17 @@ class BleService {
   /// Raw OTA status notifications: [state, err, written u32 LE].
   Stream<List<int>> get otaStatus => _otaStatusController.stream;
 
+  /// Tracker battery in percent (firmware 1.2+, …cdef5); null when unknown
+  /// or running from USB without a battery.
+  final ValueNotifier<int?> batteryPercent = ValueNotifier<int?>(null);
+  static const String batteryUuid = '12345678-1234-5678-1234-56789abcdef5';
+
+  /// Today's numbers for the tracker's idle screen (firmware 1.2+, …cdefc).
+  static const String daySummaryUuid = '12345678-1234-5678-1234-56789abcdefc';
+  final ValueNotifier<bool> daySummarySupported = ValueNotifier<bool>(false);
+  BluetoothCharacteristic? _dayChar;
+  StreamSubscription<List<int>>? _batterySub;
+
   BluetoothDevice? _device;
   BluetoothCharacteristic? _motionChar;
   BluetoothCharacteristic? _controlChar;
@@ -261,6 +272,7 @@ class BleService {
     _otaSub = null;
     _otaChar = _versionChar = null;
     otaSupported.value = false;
+    _clearDeviceInfo();
     await _connSub?.cancel();
     _connSub = null;
     if (_device != null) {
@@ -285,6 +297,7 @@ class BleService {
         _otaSub = null;
         _otaChar = _versionChar = null;
         otaSupported.value = false;
+        _clearDeviceInfo();
         connectionState.value = BleConnectionState.disconnected;
         // C4: automatic reconnection on an unexpected drop
         if (!_userDisconnected) {
@@ -403,7 +416,49 @@ class BleService {
     // Optional 1D tracking characteristics (only on firmware/Gympath_Track).
     await _subscribeTrack(service);
     await _subscribeOta(service);
+    await _subscribeDeviceInfo(service);
     return true;
+  }
+
+  static int? _batteryFrom(List<int> v) =>
+      v.isEmpty || v[0] > 100 ? null : v[0];
+
+  Future<void> _subscribeDeviceInfo(BluetoothService service) async {
+    BluetoothCharacteristic? find(String uuid) => service.characteristics
+        .cast<BluetoothCharacteristic?>()
+        .firstWhere((c) => c?.uuid == Guid(uuid), orElse: () => null);
+    final bat = find(batteryUuid);
+    if (bat != null) {
+      try {
+        batteryPercent.value = _batteryFrom(await bat.read());
+        await bat.setNotifyValue(true);
+        _batterySub?.cancel();
+        _batterySub = bat.onValueReceived
+            .listen((v) => batteryPercent.value = _batteryFrom(v));
+      } catch (_) {}
+    }
+    _dayChar = find(daySummaryUuid);
+    daySummarySupported.value = _dayChar != null;
+  }
+
+  void _clearDeviceInfo() {
+    _batterySub?.cancel();
+    _batterySub = null;
+    batteryPercent.value = null;
+    _dayChar = null;
+    daySummarySupported.value = false;
+  }
+
+  /// Send today's numbers to the tracker's idle screen.
+  Future<bool> writeDaySummary(List<int> packet) async {
+    final c = _dayChar;
+    if (c == null) return false;
+    try {
+      await c.write(packet, withoutResponse: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _subscribeTrack(BluetoothService service) async {
