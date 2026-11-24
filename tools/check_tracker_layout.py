@@ -71,7 +71,7 @@ def ring_pixel(x,y):
     return False
 L=dict(  # element: (font, y, worst-case text)
   link=('dot',30,None),
-  battery=('FONT_TINY',44,'100% CHG'),
+  battery=('FONT_TINY',44,'100%'),
   top=('FONT_SMALL',66,'last sync: Wed'),
   big=('FONT_BIG',106,'1888'),
   goal=('FONT_SMALL',138,'reps / 120'),
@@ -86,7 +86,7 @@ def boxes():
         if f=='dot': out[k]=(117,y-4,124,y+4)
         elif f=='dots': out[k]=(120-3*15-8,y-8,120+3*15+8,y+8)
         elif k=='battery':
-            w=22+5+V.width(F[f],s); x0=120-w//2; out[k]=(x0,y-F[f]['H']//2-1,x0+w+2,y+F[f]['H']//2+1)
+            w=25+2+5+V.width(F[f],s); x0=120-w//2; out[k]=(x0,y-F[f]['H']//2-1,x0+w+2,y+F[f]['H']//2+1)
         else:
             fo=F[f]; w=V.width(fo,s); out[k]=(120-w//2,y-fo['H']//2,120-w//2+w,y-fo['H']//2+fo['H'])
     return out
@@ -137,12 +137,13 @@ def preview(path):
     arc(118, 108, 40, 320, (40, 40, 44)); arc(118, 108, 40, 40 + int(280 * 0.8), (0, 255, 136))
     arc(104, 98, 40, 320, (40, 40, 44)); arc(104, 98, 40, 40 + int(280 * 8 / 13), (56, 176, 248))
     d.ellipse([117, 27, 123, 33], fill=(0, 255, 136))
-    txt, f = "82% CHG", F["FONT_TINY"]
-    total = 22 + 2 + 5 + V.width(f, txt); x = 120 - total // 2
-    d.rounded_rectangle([x, 38, x + 21, 49], radius=3, outline="white")
-    d.rectangle([x + 22, 42, x + 23, 45], fill="white")
-    d.rectangle([x + 3, 41, x + 3 + 13, 46], fill=(0, 255, 136))
-    V.render(img, f, txt, x + 29 + V.width(f, txt) // 2, 44, (0, 255, 136))
+    txt, f = "82%", F["FONT_TINY"]
+    total = 25 + 2 + 5 + V.width(f, txt); x = 120 - total // 2
+    d.rounded_rectangle([x, 38, x + 24, 50], radius=3, outline="white")
+    d.rectangle([x + 25, 42, x + 26, 46], fill="white")
+    for i in range(3):
+        d.rectangle([x + 3 + i * 5, 41, x + 3 + i * 5 + 3, 47], fill=(0, 255, 136))
+    V.render(img, f, txt, x + 32 + V.width(f, txt) // 2, 44, (0, 255, 136))
     V.render(img, F["FONT_SMALL"], "Tue  10:30", 120, 66, (130, 130, 130))
     V.render(img, F["FONT_BIG"], "48", 120, 106, (255, 255, 255))
     V.render(img, F["FONT_SMALL"], "reps / 60", 120, 138, (0, 255, 136))

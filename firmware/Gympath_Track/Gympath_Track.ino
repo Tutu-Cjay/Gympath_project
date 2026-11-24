@@ -24,6 +24,8 @@
  * Board: Waveshare ESP32-S3-LCD-1.28 (TFT_eSPI setup: firmware/tft_setup).
  *
  * Release notes
+ * 1.2.4: charging is shown by the battery's blocks filling up one after
+ * another (no CHG text); the battery icon has 4 blocks.
  * 1.2.3: anti-aliased text (Roboto) and shapes; fixed overlaps: the battery
  * strip no longer erases the inner ring and the footer line fits the round
  * screen (layout checked by tools/check_tracker_layout.py).
@@ -60,10 +62,10 @@
 #include "soc/usb_serial_jtag_reg.h"
 #include <math.h>
 
-#define FW_VERSION   "1.2.3"     // bump on every release; the app compares it
+#define FW_VERSION   "1.2.4"     // bump on every release; the app compares it
                                  // with the published manifest.json to offer
                                  // updates (.github/workflows/firmware.yml)
-#define FW_BUILD     "TRACK-1D-7"
+#define FW_BUILD     "TRACK-1D-8"
 #define DEBUG_STREAM 0   // 1 = CSV over serial (t,a,v,p,reps,state) @ 50 Hz
 #define SERIAL_BAUD  921600
 
@@ -683,37 +685,77 @@ void ringDelta(int r, int ir, uint32_t& shown, uint32_t now, uint16_t fg) {
 // Battery row, centred: icon then text. Clears only what it drew last time
 // (the strip sits between the rings' top ends; layout checked in
 // tools/check_tracker_layout.py).
-int batLeft = 0, batRight = 0;
+// The icon holds BAT_BLOCKS blocks. Charging: the blocks above the charge
+// already in the cell light up one after another and start again, like a
+// phone; only the block that changes is repainted.
+const int BAT_BLOCKS = 4, BAT_W = 25, BAT_H = 13;
+int      batLeft = 0, batRight = 0;   // the battery row as drawn last
+int      batX = 0, batY = 0;          // icon position
+uint8_t  batLit = 0;                  // blocks lit now (bit mask)
+uint16_t batLitColor = 0;
+
+void batBlock(int i, uint16_t c) {
+  int bw = (BAT_W - 6 - (BAT_BLOCKS - 1)) / BAT_BLOCKS;   // 1 px gaps
+  tft.fillRect(batX + 3 + i * (bw + 1), batY + 3, bw, BAT_H - 6, c);
+}
+
+uint16_t batColor() {
+  int pct = batPct;
+  return !batPresent || pct < 0 ? COL_MUTED
+       : batCharging || pct > 50 ? COL_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
+}
+
+// Blocks to show now: the charge, plus the running charge animation.
+uint8_t batMask(uint32_t ms) {
+  int pct = batPct;
+  if (!batPresent || pct <= 0) return 0;
+  int full = (pct * BAT_BLOCKS + BAT_BLOCKS - 1) / 100;     // round up: 1% = 1
+  if (full > BAT_BLOCKS) full = BAT_BLOCKS;
+  if (batCharging && pct < 100) {
+    int base = pct * BAT_BLOCKS / 100;                      // fully charged ones
+    int steps = BAT_BLOCKS - base + 1;                      // … then 1, 2, … more
+    full = base + (int)((ms / 450) % steps);
+  }
+  uint8_t m = 0;
+  for (int i = 0; i < full; i++) m |= 1 << i;
+  return m;
+}
+
+// Outline and percentage: drawn when the value changes.
 void drawBattery(int cy) {
   int pct = batPct;
-  char txt[12];
+  char txt[8];
   if (!batPresent) snprintf(txt, sizeof txt, "USB");
   else if (pct < 0) snprintf(txt, sizeof txt, "--%%");
-  else if (batCharging) snprintf(txt, sizeof txt, "%d%% CHG", pct);
   else snprintf(txt, sizeof txt, "%d%%", pct);
-  uint16_t c = !batPresent || pct < 0 ? COL_MUTED
-             : batCharging ? COL_GREEN
-             : pct > 50 ? COL_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
+  uint16_t c = batColor();
   useFont(FONT_TINY);
-  const int w = 22, h = 12, gap = 5;
-  int total = w + 2 + gap + tft.textWidth(txt);
-  int x = 120 - total / 2, y = cy - h / 2;
+  const int gap = 5;
+  int total = BAT_W + 2 + gap + tft.textWidth(txt);
+  int x = 120 - total / 2;
   if (batRight > batLeft) tft.fillRect(batLeft, cy - 8, batRight - batLeft, 17, TFT_BLACK);
   batLeft = x; batRight = x + total + 1;
-  tft.drawSmoothRoundRect(x, y, 3, 2, w, h, TFT_WHITE, TFT_BLACK);
-  tft.fillSmoothRoundRect(x + w, y + 4, 3, 4, 1, TFT_WHITE, TFT_BLACK);
-  if (batPresent && pct > 0)
-    tft.fillRect(x + 3, y + 3, max(1, (w - 6) * pct / 100), h - 6, c);
-  if (batCharging) {   // bolt (anti-aliased strokes), outlined over the fill
-    tft.drawWideLine(x + 12.5f, y + 1.5f, x + 8.5f, y + 6.5f, 3.2f, TFT_BLACK, c);
-    tft.drawWideLine(x + 13.5f, y + 5.5f, x + 9.5f, y + 10.5f, 3.2f, TFT_BLACK, c);
-    tft.drawWideLine(x + 12.5f, y + 1.5f, x + 8.5f, y + 6.5f, 1.6f, TFT_YELLOW, TFT_BLACK);
-    tft.drawWideLine(x + 8.5f, y + 6.5f, x + 13.5f, y + 5.5f, 1.6f, TFT_YELLOW, TFT_BLACK);
-    tft.drawWideLine(x + 13.5f, y + 5.5f, x + 9.5f, y + 10.5f, 1.6f, TFT_YELLOW, TFT_BLACK);
-  }
+  batX = x; batY = cy - BAT_H / 2;
+  tft.drawSmoothRoundRect(batX, batY, 3, 2, BAT_W, BAT_H, TFT_WHITE, TFT_BLACK);
+  tft.fillSmoothRoundRect(batX + BAT_W, batY + 4, 3, 5, 1, TFT_WHITE, TFT_BLACK);
+  batLit = 0;                          // blocks drawn fresh below
+  batLitColor = c;
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(c, TFT_BLACK, true);
-  tft.drawString(txt, x + w + 2 + gap, cy);
+  tft.drawString(txt, x + BAT_W + 2 + gap, cy);
+}
+
+// Blocks: repaint only those that switch (or all on a colour change).
+void updateBatteryBlocks(uint32_t ms) {
+  uint8_t want = batMask(ms);
+  uint16_t c = batColor();
+  for (int i = 0; i < BAT_BLOCKS; i++) {
+    bool on = want & (1 << i), was = batLit & (1 << i);
+    if (on && (!was || c != batLitColor)) batBlock(i, c);
+    else if (!on && was) batBlock(i, TFT_BLACK);
+  }
+  batLit = want;
+  batLitColor = c;
 }
 
 const int DOT_Y = 196;
@@ -770,6 +812,7 @@ void updateDashboard() {
     drawBattery(44);
     dv.bat = (int8_t)batPct; dv.batPresent = batPresent; dv.charging = batCharging;
   }
+  updateBatteryBlocks(millis());
   bool connected = bleServer && bleServer->getConnectedCount() > 0;
   if (connected != dv.connected || !dv.linkDrawn) {
     // app link: a dot at the top, between the rings' ends
@@ -888,7 +931,7 @@ void displayTask(void*) {
     if (state == ST_IDLE && !testMode) {
       if (!dashOn) { dv.valid = false; dashOn = true; }
       updateDashboard();
-      vTaskDelay(pdMS_TO_TICKS(250));
+      vTaskDelay(pdMS_TO_TICKS(batCharging ? 150 : 250));
       continue;
     }
 
