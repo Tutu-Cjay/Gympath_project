@@ -149,8 +149,9 @@ EXERCISES = {
         fore=((-0.10, -0.80, 0.58), (0.02, -0.10, -0.99)),
         lean=(9, 9), retract=(0, 0)),
     "CableBicepCurl": dict(
-        upper=((0.10, 0.03, -1.0), (0.10, -0.10, -0.99)),
-        fore=((0.06, -0.10, -0.99), (0.02, -0.62, 0.78)),
+        # the bar starts resting on the front of the thighs
+        upper=((0.10, -0.06, -1.0), (0.10, -0.12, -0.99)),
+        fore=((0.06, -0.38, -0.92), (0.02, -0.62, 0.78)),
         lean=(0, 0), retract=(0, 0)),
     "CableChestFly": dict(
         upper=((0.90, 0.22, -0.28), (0.24, -0.90, -0.34)),
@@ -1462,13 +1463,13 @@ PROPS = [
     # Pulldown seat: pad, post and the roller that holds the thighs down.
     ("prop_seat_a", "pad", box_mesh((0, 0, -0.035), (0.40, 0.36, 0.07))),
     ("prop_seat_a", "equipment", box_mesh((0, 0, -0.27), (0.07, 0.07, 0.40))),
-    ("prop_seat_a", "pad", rod_mesh((-0.26, -0.30, 0.215), (0.26, -0.30, 0.215), 0.05, 12)),
+    ("prop_seat_a", "pad", rod_mesh((-0.26, -0.30, 0.24), (0.26, -0.30, 0.24), 0.05, 12)),
     ("prop_seat_a", "equipment", box_mesh((0, -0.30, -0.05), (0.05, 0.05, 0.44))),
     # Row bench: long pad, two legs and the foot plate.
     ("prop_seat_b", "pad", box_mesh((0, -0.05, -0.035), (0.34, 0.95, 0.07))),
     ("prop_seat_b", "equipment", box_mesh((0, 0.25, -0.27), (0.07, 0.07, 0.40))),
     ("prop_seat_b", "equipment", box_mesh((0, -0.35, -0.27), (0.07, 0.07, 0.40))),
-    ("prop_seat_b", "equipment", box_mesh((0, -0.92, -0.16), (0.50, 0.04, 0.34))),
+    ("prop_seat_b", "equipment", box_mesh((0, -0.945, -0.16), (0.50, 0.04, 0.34))),
 ]
 prop_ranges = []
 for bone, mat, (pv, pf) in PROPS:
@@ -1720,7 +1721,9 @@ def two_bone(S, W, L1, L2, E_hint):
     """Elbow and (reachable) wrist for shoulder S, wrist target W, bone
     lengths L1, L2; the elbow bends towards E_hint."""
     d = W - S
-    dist = min(max(d.length, abs(L1 - L2) + 1e-4), L1 + L2 - 1e-4)
+    # never locked quite straight: a slight bend lets the elbow stay clear
+    # of the trunk (and real arms keep one under load)
+    dist = min(max(d.length, abs(L1 - L2) + 1e-4), (L1 + L2) * 0.985)
     dn = d.normalized()
     a = (L1 * L1 - L2 * L2 + dist * dist) / (2 * dist)
     hgt = math.sqrt(max(L1 * L1 - a * a, 0.0))
@@ -1737,7 +1740,7 @@ PALM_LAST = {}       # (exercise, side) -> last palm normal, for continuity
 IK_MISS = collections.defaultdict(float)
 
 
-def hold_handle(ex_name, pose):
+def hold_handle(ex_name, pose, adjust=None):
     """Put both hands on the handle: the handle across each palm in the
     closed fingers, and on a fixed bar the hands always the same distance
     apart (the arms reach it by two-bone IK; the elbows keep bending the way
@@ -1748,13 +1751,14 @@ def hold_handle(ex_name, pose):
     fk = {s: grip_point(pose, s) for s in "lr"}
     mid = (fk["l"] + fk["r"]) / 2
     across = (fk["l"] - fk["r"]).normalized()
+    shift = adjust["shift"] if adjust else Vector()
     if g["width"] == "fixed":
         if ex_name not in BAR_WIDTH:
             BAR_WIDTH[ex_name] = (fk["l"] - fk["r"]).length
         half = BAR_WIDTH[ex_name] / 2
-        target = {"l": mid + across * half, "r": mid - across * half}
+        target = {"l": mid + shift + across * half, "r": mid + shift - across * half}
     else:
-        target = fk
+        target = {s: fk[s] + shift for s in "lr"}
     for s in "lr":
         up, lo, hand = f"upperarm_{s}", f"lowerarm_{s}", f"hand_{s}"
         S = pose[up].to_translation()
@@ -1776,7 +1780,8 @@ def hold_handle(ex_name, pose):
                 n = -n
             R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
-            E, W = two_bone(S, W_goal, L1, L2, E0 if _ == 0 else E)
+            hint = E0 + (adjust["elbow"][s] if adjust else Vector())
+            E, W = two_bone(S, W_goal, L1, L2, hint if _ == 0 else E)
             fore = (W - E).normalized()
         PALM_LAST[(ex_name, s)] = n
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
@@ -1804,6 +1809,191 @@ def hold_handle(ex_name, pose):
 P0 = REST["pelvis"].to_translation()
 HIP_REST = Vector(J["hip_l"])
 SHANK = (Vector(J["ankle_l"]) - Vector(J["knee_l"])).length
+
+
+# ------------------------------------------------------------ collisions ----
+# The posed figure and machine are checked for parts passing into each
+# other: an arm or hand into the trunk, head or thighs, the bar or a cable
+# into the body. Every vertex belongs to one body segment (its strongest
+# bone); a point is inside a segment when it lies behind that segment's
+# nearest skin.
+from mathutils.bvhtree import BVHTree  # noqa: E402
+
+PROP_OF = np.full(len(V), -1)
+for _bone, _a, _b in prop_ranges:
+    PROP_OF[_a:_b] = PROP_BONES.index(_bone)
+_NOT_BODY = set(FACE_MATERIALS) | {"brows", "equipment", "cable", "tracker", "pad"} | \
+    {m for m in material_names if m.startswith("hair_")}
+_body_face = np.array([material_names[m] not in _NOT_BODY for m in MAT]) & (PROP_OF[F[:, 0]] < 0)
+
+
+def _segment(b):
+    if b.startswith(("upperarm", "shoulder_h")):
+        return "uarm_" + b[-1]
+    if b.startswith(("lowerarm", "elbow_h")):
+        return "farm_" + b[-1]
+    if b.startswith("hand"):
+        return "hand_" + b[-1]
+    if b.startswith(("thigh", "hip_h")):
+        return "thigh_" + b[-1]
+    if b.startswith(("calf", "knee_h", "foot")):
+        return "shin_" + b[-1]
+    if b in ("head", "neck"):
+        return "head"
+    return "torso"
+
+
+SEGS = sorted({_segment(b) for b in BONE_NAMES})
+_body_v = np.zeros(len(V), bool)
+_body_v[np.unique(F[_body_face])] = True
+SEG_OF = np.full(len(V), -1)
+SEG_OF[_body_v] = [SEGS.index(_segment(BONE_NAMES[k])) for k in W[_body_v].argmax(axis=1)]
+# a face belongs to the segment most of its corners belong to
+_fs = SEG_OF[F]
+FACE_SEG = np.where(_fs[:, 1] == _fs[:, 2], _fs[:, 1], _fs[:, 0])
+FACE_SEG[~_body_face] = -1
+_bone_cols = [(k, np.nonzero(W[:, k] > 1e-4)[0]) for k in range(len(BONE_NAMES))]
+
+
+def _along(bone, ix):
+    """How far along its bone (0 head .. 1 tail) each vertex lies, at rest."""
+    h, t = np.array(REST[bone].to_translation()), np.array(BONES[bone][1])
+    return ((V[ix] - h) @ (t - h)) / ((t - h) @ (t - h))
+
+
+# the far end of the upper arm (elbow) and of the forearm (wrist): the parts
+# that can pass into the trunk / the upper arm; near the joint they touch
+PART_IX = {}
+for _s in "lr":
+    for _seg, _bone, _from in (("uarm", f"upperarm_{_s}", 0.45), ("farm", f"lowerarm_{_s}", 0.35)):
+        _ix = np.nonzero(SEG_OF == SEGS.index(f"{_seg}_{_s}"))[0]
+        PART_IX[f"{_seg}far_{_s}"] = _ix[_along(_bone, _ix) > _from]
+for _seg in SEGS:
+    PART_IX[_seg] = np.nonzero(SEG_OF == SEGS.index(_seg))[0]
+# seat pads and plates (prop, centre, size) / rollers (prop, a, b, radius)
+PAD_BOXES = [("prop_seat_a", (0, 0, -0.035), (0.40, 0.36, 0.07)), ("prop_seat_b", (0, -0.05, -0.035), (0.34, 0.95, 0.07)),
+             ("prop_seat_b", (0, -0.945, -0.16), (0.50, 0.04, 0.34))]
+PAD_RODS = [("prop_seat_a", (-0.26, -0.30, 0.24), (0.26, -0.30, 0.24), 0.05)]
+SEAT_SQUASH = 0.015          # a seat gives a little under the body
+_Vh = np.c_[V, np.ones(len(V))]
+
+
+def posed_verts(pose):
+    """Every vertex of the figure and machine in this pose (linear blend)."""
+    out = np.zeros((len(V), 3))
+    for k, ix in _bone_cols:
+        m = np.array(pose[BONE_NAMES[k]] @ REST[BONE_NAMES[k]].inverted())
+        out[ix] += W[ix, k, None] * (_Vh[ix] @ m.T)[:, :3]
+    for name in PROP_BONES:
+        ix = np.nonzero(PROP_OF == PROP_BONES.index(name))[0]
+        if len(ix) and name in pose:
+            m = np.array(pose[name] @ REST[name].inverted())
+            out[ix] = (_Vh[ix] @ m.T)[:, :3]
+    return out
+
+
+def _bvh(P, seg):
+    faces = F[FACE_SEG == SEGS.index(seg)]
+    return BVHTree.FromPolygons([Vector(p) for p in P], faces.tolist(), epsilon=0.0), P[faces]
+
+
+def winding(p, tris):
+    """Generalised winding number of point p for triangles (M, 3, 3):
+    about 1 inside a closed outward-facing surface, 0 outside; a segment of
+    the skin is open where it meets the next one, which only takes a little
+    off."""
+    a, b, c = tris[:, 0] - p, tris[:, 1] - p, tris[:, 2] - p
+    la, lb, lc = (np.linalg.norm(x, axis=1) for x in (a, b, c))
+    det = np.einsum("ij,ij->i", a, np.cross(b, c))
+    div = la * lb * lc + np.einsum("ij,ij->i", a, b) * lc + \
+        np.einsum("ij,ij->i", b, c) * la + np.einsum("ij,ij->i", c, a) * lb
+    return float(np.arctan2(det, div).sum() / (2 * math.pi))
+
+
+def _line_points(pose, name, n=24):
+    """Points along a rod prop's axis (bar, cable), posed."""
+    m = pose[name] @ REST[name].inverted()
+    return [m @ Vector((0, y, 0)) for y in np.linspace(-0.5 if name == "prop_bar" else 0.0, 0.5 if name == "prop_bar" else 1.0, n)]
+
+
+# who may not pass into whom: (moving part, segment), how deep is allowed
+# (m; skin meets skin a little where limbs rest on each other)
+CONTACT = 0.006
+PAIRS = [(f"{a}_{s}", b) for s in "lr" for a in ("hand", "farm") for b in ("torso", "head", "thigh_l", "thigh_r")] + \
+        [(f"uarm_{s}", "head") for s in "lr"] + [("farm_l", "farm_r"), ("hand_l", "hand_r")] + \
+        [(f"uarmfar_{s}", "torso") for s in "lr"] + [(f"farmfar_{s}", f"uarm_{s}") for s in "lr"] + \
+        [(f"hand_{s}", f"uarm_{s}") for s in "lr"]
+
+
+def penetrations(pose, P=None, seat=False):
+    """Deepest passing of each pair in this pose: {(part, segment): (depth m,
+    outward direction at the deepest point)}."""
+    if P is None:
+        P = posed_verts(pose)
+    trees = {}
+    out = {}
+
+    def tree(seg):
+        if seg not in trees:
+            trees[seg] = _bvh(P, seg)
+        return trees[seg]
+
+    def deepest(points, seg, radius=0.0):
+        """Deepest point really inside the segment: behind its nearest skin
+        and (checked from the deepest down) with a winding number over 1/2."""
+        t, tris = tree(seg)
+        cands = []
+        for p in points:
+            hit = t.find_nearest(Vector(p), 0.25)
+            if hit[0] is None:
+                continue
+            sd = (Vector(p) - hit[0]).dot(hit[1])
+            if radius - sd > CONTACT and (sd < 0 or hit[3] < radius):
+                cands.append((radius - sd, np.asarray(p, float), hit[1].copy()))
+        cands.sort(key=lambda x: -x[0])
+        for d, p, nrm in cands[:10]:
+            if winding(p, tris) > 0.5:
+                return d, nrm
+        return 0.0, None
+
+    for part, seg in PAIRS:
+        d, nrm = deepest(P[PART_IX[part][::2]], seg)
+        if d > CONTACT:
+            out[(part, seg)] = (d, nrm)
+    # the body on the seat pads: no deeper than a pad gives
+    body = P[_body_v]
+    for bi, (prop, centre, size) in enumerate(PAD_BOXES):
+        m = pose[prop] @ REST[prop].inverted()
+        if m.to_3x3().determinant() < 1e-6:
+            continue
+        loc = (np.c_[body, np.ones(len(body))] @ np.array(m.inverted()).T)[:, :3] - np.array(centre)
+        inside = (np.abs(loc) < np.array(size) / 2).all(axis=1)
+        if inside.any():
+            d = (np.array(size) / 2 - np.abs(loc[inside])).min(axis=1).max()
+            if d > SEAT_SQUASH:
+                out[(f"{prop}#{bi}", "body")] = (d - SEAT_SQUASH, None)
+    for prop, a, b, r in PAD_RODS:
+        m = pose[prop] @ REST[prop].inverted()
+        if m.to_3x3().determinant() < 1e-6:
+            continue
+        loc = (np.c_[body, np.ones(len(body))] @ np.array(m.inverted()).T)[:, :3]
+        a, b = np.array(a), np.array(b)
+        t = np.clip((loc - a) @ (b - a) / ((b - a) @ (b - a)), 0, 1)
+        dist = np.linalg.norm(loc - (a + t[:, None] * (b - a)), axis=1)
+        d = r - dist.min()
+        if d > SEAT_SQUASH:
+            out[(prop + "_roller", "body")] = (d - SEAT_SQUASH, None)
+    for prop, radius in (("prop_bar", BAR_RADIUS), ("prop_cable_a", 0.004), ("prop_cable_b", 0.004),
+                         ("prop_cable_c", 0.004)):
+        if pose[prop].to_3x3().determinant() < 1e-9:
+            continue                           # hidden in this exercise
+        pts = _line_points(pose, prop)
+        for seg in ("torso", "head", "thigh_l", "thigh_r", "shin_l", "shin_r", "uarm_l", "uarm_r",
+                    "farm_l", "farm_r"):
+            d, nrm = deepest(pts, seg, radius)
+            if d > CONTACT:
+                out[(prop, seg)] = (d, nrm)
+    return out
 
 
 def solve_props(ex_name, pose, c, hip_z):
@@ -1839,11 +2029,15 @@ def solve_props(ex_name, pose, c, hip_z):
     if ex_name == "LatPulldown":
         out["prop_seat_a"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
     if ex_name == "SeatedCableRow":
-        out["prop_seat_b"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
+        fit = ROW_SEAT.get("fit")
+        if fit:                               # fitted to the figure (fit_row_seat)
+            out["prop_seat_b"] = place(fit)
+        else:
+            out["prop_seat_b"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.108))
     return out
 
 
-def solve_pose(ex_name, c):
+def solve_pose(ex_name, c, adjust=None):
     ex = EXERCISES[ex_name]
     seat = SEATED.get(ex_name)
     hip_z = HIP_REST.z
@@ -1891,7 +2085,9 @@ def solve_pose(ex_name, c):
             swing = current.rotation_difference(aims[name]).to_matrix()
             m = here @ (swing @ base.to_3x3()).to_4x4()
         pose[name] = m
-    hold_handle(ex_name, pose)
+    if adjust is None:
+        adjust = adjust_at(ex_name, c)
+    hold_handle(ex_name, pose, adjust)
     # Helper bones turn half as far as the bone below their joint.
     for h, (above, below, _, _) in HELPERS.items():
         base_b = pose[above] @ REST[above].inverted() @ REST[below]
@@ -1923,11 +2119,140 @@ def key_pose(pose, frame, last):
             pb.keyframe_insert("scale", frame=frame)
 
 
+# ----------------------------------------------------- collision fixes ----
+# Where a pose has parts passing into each other, the bar (the hands) moves
+# out of the body and the elbows out from the trunk, by as much as they
+# went in. Solved at points through the rep, then smoothed, so the
+# correction itself moves smoothly.
+ADJUST = {}                  # exercise -> [(c, adjust)]
+# exactly the contractions the animation is keyed at (every 2nd frame)
+_nf = int(round(REP_SECONDS * FPS))
+ADJ_GRID = np.array(sorted({round(contraction(f / _nf), 6) for f in range(0, _nf + 1, 2)}))
+MARGIN = 0.008
+
+
+def _zero_adjust():
+    return dict(shift=Vector(), elbow={"l": Vector(), "r": Vector()})
+
+
+def adjust_at(ex_name, c):
+    table = ADJUST.get(ex_name)
+    if not table:
+        return None
+    cs = [t for t, _ in table]
+    k = int(np.clip(np.searchsorted(cs, c) - 1, 0, len(cs) - 2))
+    f = (c - cs[k]) / (cs[k + 1] - cs[k])
+    a, b = table[k][1], table[k + 1][1]
+    return dict(shift=a["shift"].lerp(b["shift"], f),
+                elbow={s: a["elbow"][s].lerp(b["elbow"][s], f) for s in "lr"})
+
+
+def _fix(ex_name, c, adj, tries=16):
+    """Move the bar / elbows (adj, in place) until nothing passes into
+    anything at contraction c; returns what is left (m)."""
+    pen = {}
+    for _ in range(tries):
+        pose = solve_pose(ex_name, float(c), adj)
+        pen = penetrations(pose)
+        push, elbow = Vector(), {"l": Vector(), "r": Vector()}
+        for (a, b), (d, nrm) in pen.items():
+            if nrm is None:
+                continue
+            step = d + MARGIN
+            # the bar moves out the way the skin faces, in the body's middle
+            # plane (left and right pushes cancel): forward when the skin
+            # faces sideways
+            out = Vector((0, nrm.y, nrm.z))
+            out = out.normalized() if out.length > 0.3 else Vector((0, -1, 0))
+            if a.startswith("uarmfar"):            # elbow into the trunk:
+                elbow[a[-1]] += nrm * step         # out, and the hands forward
+                push += out * step * 0.5
+            elif a.startswith("farmfar"):          # elbow bent into itself:
+                mid = (pose["upperarm_l"].to_translation() + pose["upperarm_r"].to_translation()) / 2
+                bar = (grip_point(pose, "l") + grip_point(pose, "r")) / 2
+                push += (bar - mid).normalized() * step * 0.5   # reach further
+            else:                                  # hands, forearms, bar, cable
+                push += out * step * 0.5
+        if push.length < 1e-4 and all(v.length < 1e-4 for v in elbow.values()):
+            break
+        push.x = 0.0                               # the bar stays centred
+        adj["shift"] += push
+        for s in "lr":
+            adj["elbow"][s] += elbow[s] * 1.5
+    return max((d for d, _ in pen.values()), default=0.0)
+
+
+def solve_adjust(ex_name):
+    if not GRIP.get(ex_name):
+        return None
+    raw = []
+    for c in ADJ_GRID:
+        adj = _zero_adjust()
+        _fix(ex_name, c, adj)
+        raw.append(adj)
+    n = len(raw)
+
+    def smooth(vals, reach, sigma):
+        """Per axis: the strongest value within `reach` grid points, then a
+        Gaussian blur; so a correction ramps in and out gently and is still
+        whole where it is needed."""
+        arr = np.array([[v.x, v.y, v.z] for v in vals])
+        wide = np.zeros_like(arr)
+        for i in range(n):
+            win = arr[max(0, i - reach):i + reach + 1]
+            wide[i] = win[np.abs(win).argmax(axis=0), [0, 1, 2]]
+        k = np.exp(-0.5 * (np.arange(-3 * sigma, 3 * sigma + 1) / sigma) ** 2) if sigma else np.ones(1)
+        out = np.zeros_like(wide)
+        for i in range(n):
+            idx = np.clip(np.arange(i - len(k) // 2, i + len(k) // 2 + 1), 0, n - 1)
+            out[i] = (wide[idx] * k[:, None]).sum(axis=0) / k.sum()
+        return [Vector(v) for v in out]
+    shift = smooth([a["shift"] for a in raw], 5, 3)
+    elbows = {s: smooth([a["elbow"][s] for a in raw], 5, 3) for s in "lr"}
+    table = []
+    for i, c in enumerate(ADJ_GRID):
+        # the smoothed correction, topped up where smoothing left a touch
+        adj = dict(shift=shift[i].copy(), elbow={s: elbows[s][i].copy() for s in "lr"})
+        left = _fix(ex_name, c, adj, tries=8)
+        if left > 0.005:
+            print(f"  {ex_name} c={c:.2f}: {left * 100:.1f} cm left after fixing")
+        table.append((float(c), adj))
+    print(f"  {ex_name} corrections (cm): bar", [round(a["shift"].length * 100, 1) for _, a in table],
+          "elbow", [round(a["elbow"]["l"].length * 100, 1) for _, a in table])
+    return table
+
+
+ROW_SEAT = {}
+
+
+def fit_row_seat():
+    """The row bench under this figure: its pad just under the seat bones and
+    the foot plate just against the soles (each pressed in by a few mm)."""
+    pose = solve_pose("SeatedCableRow", 0.0)
+    P = posed_verts(pose)
+    body = P[_body_v]
+    feet = np.isin(SEG_OF, [SEGS.index("shin_l"), SEGS.index("shin_r")])
+    sole = P[feet & _body_v][:, 1].min() + 0.006
+    # the foot plate's back face is 0.925 m in front of the bench's origin,
+    # the pad runs from 0.525 m in front of it to 0.425 m behind
+    y0 = sole + 0.925
+    under = (np.abs(body[:, 0]) < 0.17) & (body[:, 1] > y0 - 0.525) & (body[:, 1] < y0 + 0.425)
+    top = body[under, 2].min() + 0.006
+    ROW_SEAT["fit"] = (0.0, y0, top)
+    print(f"row bench: pad top {top:.3f} m, foot plate at {sole:.3f} m")
+
+
+if QBODY:
+    fit_row_seat()
+
 frames = int(round(REP_SECONDS * FPS))
 scene.frame_start, scene.frame_end = 0, frames
 arm.animation_data_create()
 actions = {}
 for ex_name, ex in EXERCISES.items():
+    only = os.environ.get("COLLISIONS_ONLY")
+    if os.environ.get("COLLISIONS", "1") == "1" and (not only or ex_name in only.split(",")):
+        ADJUST[ex_name] = solve_adjust(ex_name)
     action = bpy.data.actions.new(ex_name)
     arm.animation_data.action = action
     last = {}
@@ -1944,6 +2269,31 @@ for ex_name, action in actions.items():
     if slot is not None and hasattr(strip, "action_slot") and action.slots:
         strip.action_slot = action.slots[0]
     track.mute = True
+
+# ------------------------------------------------------ collision report ----
+def collision_report():
+    P0_ = posed_verts({n: REST[n] for n in REST})
+    t_ = _bvh(P0_, "torso")[0]
+    hit_ = t_.find_nearest(REST["spine_02"].to_translation())
+    print("torso normals point", "out" if (REST["spine_02"].to_translation() - hit_[0]).dot(hit_[1]) < 0 else "IN")
+    total = 0.0
+    only = os.environ.get("COLLISIONS_ONLY")
+    for ex_name in EXERCISES:
+        if only and ex_name not in only.split(","):
+            continue
+        worst = {}
+        for c in ADJ_GRID[::2]:
+            for k, (d, _) in penetrations(solve_pose(ex_name, float(c))).items():
+                if d > worst.get(k, (0, 0))[0]:
+                    worst[k] = (d, round(float(c), 1))
+        total += sum(d for d, _ in worst.values())
+        print(f"collisions {ex_name}:", ", ".join(f"{a}->{b} {d * 100:.1f}cm@{c}" for (a, b), (d, c) in
+                                                   sorted(worst.items(), key=lambda kv: -kv[1][0])) or "none")
+    print(f"collisions total depth {total * 100:.1f} cm")
+
+
+if os.environ.get("COLLISIONS", "1") == "1":
+    collision_report()
 
 # --------------------------------------------------------------- export ----
 os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
