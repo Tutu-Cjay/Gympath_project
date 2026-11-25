@@ -1749,11 +1749,36 @@ def two_bone(S, W, L1, L2, E_hint):
 
 
 BAR_WIDTH = {}       # exercise -> hand distance on a fixed bar (from its start pose)
-PALM_K = {}          # (exercise, side) -> which way the palm turns, set at c = 0
+# Which way each palm faces through the rep: swept once per exercise and
+# body shape in small steps from the start (continuous from the grip's way
+# at c = 0), then looked up by contraction, so the same contraction always
+# gives the same hand (the rep loops without a turn) and it never flips.
+PALM_TABLE = {}      # (exercise, level) -> {side: [(c, sign)]}
+_SWEEP = None        # while sweeping: {"prev": {side: n}, "rec": {side: [(c, sign)]}}
+PALM_GRID = np.linspace(0, 1, 241)
+FLARE_SIGN = {}      # (exercise, level, side) -> which way the elbow swings out
+
+
+def palm_table(ex_name):
+    global _SWEEP
+    key = (ex_name, CUR_LEVEL)
+    if key in PALM_TABLE or not GRIP.get(ex_name) or GRIP[ex_name]["width"] == "free":
+        return
+    _SWEEP = {"prev": {}, "rec": {"l": [], "r": []}}
+    for c in PALM_GRID:
+        solve_pose(ex_name, float(c), _zero_adjust())
+    PALM_TABLE[key] = _SWEEP["rec"]
+    _SWEEP = None
+
+
+def palm_sign(ex_name, s, c):
+    rec = PALM_TABLE[(ex_name, CUR_LEVEL)][s]
+    i = int(np.clip(round(c * (len(PALM_GRID) - 1)), 0, len(rec) - 1))
+    return rec[i][1]
 IK_MISS = collections.defaultdict(float)
 
 
-def hold_handle(ex_name, pose, adjust=None):
+def hold_handle(ex_name, pose, adjust=None, c=0.0):
     """Put both hands on the handle: the handle across each palm in the
     closed fingers, and on a fixed bar the hands always the same distance
     apart (the arms reach it by two-bone IK; the elbows keep bending the way
@@ -1798,11 +1823,15 @@ def hold_handle(ex_name, pose, adjust=None):
                 # memory of earlier calls, so the rep loops without a turn):
                 # relative to where the arm motion alone would turn the
                 # palm, fixed once at the rep's start to the grip's way.
-                key = (ex_name, s)
-                if key not in PALM_K:
-                    PALM_K[key] = 1 if n.dot(Vector(g["palm"])) * n.dot(n_fk) >= 0 else -1
-                if n.dot(n_fk) * PALM_K[key] < 0:
-                    n = -n
+                if _SWEEP is not None:
+                    prev = _SWEEP["prev"].get(s, Vector(g["palm"]))
+                    sign = 1 if n.dot(prev) >= 0 else -1
+                    if _ == 3:
+                        _SWEEP["prev"][s] = n * sign
+                        _SWEEP["rec"][s].append((c, sign))
+                else:
+                    sign = palm_sign(ex_name, s, c)
+                n = n * sign
                 R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
             E, W = two_bone(S, W_goal, L1, L2, E0)
@@ -1811,9 +1840,13 @@ def hold_handle(ex_name, pose, adjust=None):
             flare = adjust["elbow"][s].x if adjust else 0.0
             if abs(flare) > 1e-6:
                 axis = (W - S).normalized()
-                side = 1 if s == "l" else -1
-                cands = [S + Quaternion(axis, a) @ (E - S) for a in (flare, -flare)]
-                E = max(cands, key=lambda e: side * e.x)
+                key = (ex_name, CUR_LEVEL, s)
+                if key not in FLARE_SIGN:            # decided once: no flipping
+                    side = 1 if s == "l" else -1
+                    up = S + Quaternion(axis, 0.3) @ (E - S)
+                    down = S + Quaternion(axis, -0.3) @ (E - S)
+                    FLARE_SIGN[key] = 1 if side * up.x >= side * down.x else -1
+                E = S + Quaternion(axis, flare * FLARE_SIGN[key]) @ (E - S)
             fore = (W - E).normalized()
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
         # upper arm and forearm swung onto the solved elbow and wrist
@@ -2140,7 +2173,9 @@ def solve_pose(ex_name, c, adjust=None):
         pose[name] = m
     if adjust is None:
         adjust = adjust_at(ex_name, c)
-    hold_handle(ex_name, pose, adjust)
+    if _SWEEP is None:
+        palm_table(ex_name)
+    hold_handle(ex_name, pose, adjust, c)
     # Helper bones turn half as far as the bone below their joint.
     for h, (above, below, _, _) in HELPERS.items():
         base_b = pose[above] @ REST[above].inverted() @ REST[below]
