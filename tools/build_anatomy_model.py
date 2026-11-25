@@ -2365,8 +2365,9 @@ def fit_lat_seat():
     y0 = pose["pelvis"].to_translation().y + 0.02
     under = (np.abs(body[:, 0]) < 0.20) & (np.abs(body[:, 1] - y0) < 0.18)
     top = body[under, 2].min() + 0.006
-    thighs = (np.abs(body[:, 0]) < 0.26) & (np.abs(body[:, 1] - (y0 - 0.30)) < 0.05)
-    thigh_top = body[thighs, 2].max() - 0.006
+    legs = P[np.isin(SEG_OF, [SEGS.index("thigh_l"), SEGS.index("thigh_r")]) & _body_v]
+    under_roller = (np.abs(legs[:, 0]) < 0.26) & (np.abs(legs[:, 1] - (y0 - 0.30)) < 0.05)
+    thigh_top = legs[under_roller, 2].max() - 0.006
     # roller: centre 0.24 m over the pad top, radius 0.05 (both stretched)
     stretch = max(1.0, (thigh_top - top) / 0.19)
     LAT_SEAT["fit"] = ((0.0, y0, top), stretch)
