@@ -2201,6 +2201,7 @@ def _fix(ex_name, c, adj, tries=16):
         adj["shift"] += push
         for s in "lr":
             adj["elbow"][s] += elbow[s] * 1.5
+    _fix.last = pen
     return max((d for d, _ in pen.values()), default=0.0)
 
 
@@ -2237,7 +2238,8 @@ def solve_adjust(ex_name):
         adj = dict(shift=shift[i].copy(), elbow={s: elbows[s][i].copy() for s in "lr"})
         left = _fix(ex_name, c, adj, tries=8)
         if left > 0.005:
-            print(f"  {ex_name}@{CUR_LEVEL} c={c:.2f}: {left * 100:.1f} cm left after fixing")
+            print(f"  {ex_name}@{CUR_LEVEL} c={c:.2f}: {left * 100:.1f} cm left after fixing",
+                  {f"{a}->{b}": round(d * 100, 1) for (a, b), (d, _) in _fix.last.items()})
         table.append((float(c), adj))
     print(f"  {ex_name} @{CUR_LEVEL} corrections (cm): bar", [round(a["shift"].length * 100, 1) for _, a in table],
           "elbow", [round(a["elbow"]["l"].length * 100, 1) for _, a in table])
