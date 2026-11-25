@@ -2282,6 +2282,30 @@ scene.frame_start, scene.frame_end = 0, frames
 arm.animation_data_create()
 actions = {}
 LEVELS = range(len(SHAPE_LEVELS)) if MORPH_D and os.environ.get("COLLISIONS", "1") == "1" else [0]
+if os.environ.get("SHAPE_LEVELS_ONLY"):
+    LEVELS = [int(x) for x in os.environ["SHAPE_LEVELS_ONLY"].split(",")]
+JERKS = {}                   # clip -> [(deg, bone, frame)] sudden turns between keys
+
+
+def jerk_check(clip, poses):
+    """Bones that turn much more between two keys than the keys around
+    them (a snap, not a fast but smooth move): the turn against the
+    average of its neighbours' turns."""
+    names = [n for n in poses[0] if not n.startswith("prop_")]
+    out = []
+    for n in names:
+        turn = []
+        for a, b in zip(poses, poses[1:]):
+            q = (b[n].to_3x3() @ a[n].to_3x3().inverted()).to_quaternion()
+            turn.append(math.degrees(2 * math.acos(min(1.0, abs(q.w)))))
+        for i in range(len(turn)):
+            near = [turn[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(turn)]
+            spike = turn[i] - sum(near) / len(near)
+            if spike > 6.0:
+                out.append((round(spike, 1), n, 2 * (i + 1)))
+    out.sort(reverse=True)
+    JERKS[clip] = out
+    print(f"jerks {clip}:", out[:6] if out else "none")
 for level in LEVELS:
     set_shape(level)
     if QBODY:
@@ -2294,8 +2318,12 @@ for level in LEVELS:
         action = bpy.data.actions.new(clip)
         arm.animation_data.action = action
         last = {}
+        poses = []
         for f in range(0, frames + 1, 2):
-            key_pose(solve_pose(ex_name, contraction(f / frames)), f, last)
+            pose = solve_pose(ex_name, contraction(f / frames))
+            poses.append({k: v.copy() for k, v in pose.items()})
+            key_pose(pose, f, last)
+        jerk_check(clip, poses)
         actions[clip] = action
 set_shape(0)
 if QBODY:
