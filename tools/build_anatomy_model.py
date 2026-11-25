@@ -1744,7 +1744,7 @@ def two_bone(S, W, L1, L2, E_hint):
 
 
 BAR_WIDTH = {}       # exercise -> hand distance on a fixed bar (from its start pose)
-PALM_LAST = {}       # (exercise, side) -> last palm normal, for continuity
+PALM_K = {}          # (exercise, side) -> which way the palm turns, set at c = 0
 IK_MISS = collections.defaultdict(float)
 
 
@@ -1777,14 +1777,21 @@ def hold_handle(ex_name, pose, adjust=None):
         rest_h, rest_n = GRIP0[s]["h"], GRIP0[s]["n"]
         off0 = GRIP0[s]["centre"] - REST[hand].to_translation()
         fore = (W0 - E0).normalized()
+        n_fk = ((pose[hand] @ REST[hand].inverted()).to_3x3() @ rest_n).normalized()
         E, W = E0, W0
         for _ in range(4):
             # hand along the forearm, square to the handle; the palm the
             # way the grip says, without flipping between frames
             h = (fore - across * fore.dot(across)).normalized()
             n = h.cross(across).normalized()
-            prev = PALM_LAST.get((ex_name, s), Vector(g["palm"]))
-            if n.dot(prev) < 0:
+            # The palm's side, the same for every call at the same c (no
+            # memory of earlier calls, so the rep loops without a turn):
+            # relative to where the arm motion alone would turn the palm,
+            # fixed once at the rep's start to the grip's way (overhand...).
+            key = (ex_name, s)
+            if key not in PALM_K:
+                PALM_K[key] = 1 if n.dot(Vector(g["palm"])) * n.dot(n_fk) >= 0 else -1
+            if n.dot(n_fk) * PALM_K[key] < 0:
                 n = -n
             R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
@@ -1798,7 +1805,6 @@ def hold_handle(ex_name, pose, adjust=None):
                 cands = [S + Quaternion(axis, a) @ (E - S) for a in (flare, -flare)]
                 E = max(cands, key=lambda e: side * e.x)
             fore = (W - E).normalized()
-        PALM_LAST[(ex_name, s)] = n
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
         # upper arm and forearm swung onto the solved elbow and wrist
         clav = f"clavicle_{s}"
@@ -2186,7 +2192,7 @@ def adjust_at(ex_name, c):
                 elbow={s: a["elbow"][s].lerp(b["elbow"][s], f) for s in "lr"})
 
 
-def _fix(ex_name, c, adj, tries=16):
+def _fix(ex_name, c, adj, tries=16, elbows=True):
     """Move the bar / elbows (adj, in place) until nothing passes into
     anything at contraction c; returns what is left (m)."""
     pen = {}
@@ -2219,7 +2225,8 @@ def _fix(ex_name, c, adj, tries=16):
         if adj["shift"].length > MAX_SHIFT:        # never a different exercise
             adj["shift"] *= MAX_SHIFT / adj["shift"].length
         for s in "lr":
-            adj["elbow"][s].x = min(adj["elbow"][s].x + elbow[s].x, MAX_FLARE)
+            if elbows:
+                adj["elbow"][s].x = min(adj["elbow"][s].x + elbow[s].x, MAX_FLARE)
     _fix.last = pen
     return max((d for d, _ in pen.values()), default=0.0)
 
@@ -2227,6 +2234,7 @@ def _fix(ex_name, c, adj, tries=16):
 def solve_adjust(ex_name):
     if not GRIP.get(ex_name):
         return None
+    solve_pose(ex_name, 0.0, _zero_adjust())    # palm way and bar width: from the start
     raw = []
     for c in ADJ_GRID:
         adj = _zero_adjust()
@@ -2252,8 +2260,15 @@ def solve_adjust(ex_name):
     # Smooth by construction: each value becomes the strongest within
     # REACH grid points, then a Gaussian of at most that reach, so every
     # point keeps at least the correction it needed and nothing jumps.
-    shift = smooth([a["shift"] for a in raw], 9, 3)
-    elbows = {s: smooth([a["elbow"][s] for a in raw], 9, 3) for s in "lr"}
+    # the elbows hold one place through the rep, as far out as the rep
+    # ever needs them (a moving elbow in a pushdown or curl looks wrong)
+    elbows = {s: [Vector((max(a["elbow"][s].x for a in raw), 0, 0))] * n for s in "lr"}
+    if any(e[0].x > 0 for e in elbows.values()):
+        # with the elbows held out all the rep, the bar's moves again
+        for i, c in enumerate(ADJ_GRID):
+            raw[i] = dict(shift=Vector(), elbow={s: elbows[s][i].copy() for s in "lr"})
+            _fix(ex_name, c, raw[i], elbows=False)
+    shift = smooth([a["shift"] for a in raw], 18, 6)
     table = [(float(c), dict(shift=shift[i], elbow={s: elbows[s][i] for s in "lr"}))
              for i, c in enumerate(ADJ_GRID)]
     for c, adj in table:
@@ -2320,6 +2335,17 @@ def jerk_check(clip, poses):
             near = [step[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(step)]
             if step[i] - sum(near) / len(near) > 1.5:
                 out.append((round(step[i] - sum(near) / len(near), 1), f"grip_{s} (cm)", 2 * (i + 1)))
+    trace = os.environ.get("JERK_TRACE", "")
+    if trace and trace.split(":")[0] == clip:
+        n = trace.split(":")[1]
+        turn = []
+        for a, b in zip(poses, poses[1:]):
+            q = (b[n].to_3x3() @ a[n].to_3x3().inverted()).to_quaternion()
+            turn.append(round(math.degrees(2 * math.acos(min(1.0, abs(q.w)))), 1))
+        print(f"trace {clip} {n}:", turn)
+        print(f"trace {clip} c:", [round(contraction(2 * i / int(round(REP_SECONDS * FPS))), 3) for i in range(len(poses))])
+        if ADJUST.get((clip.split("@")[0], CUR_LEVEL)):
+            print("trace flare:", [round(math.degrees(adjust_at(clip.split("@")[0], contraction(2 * i / int(round(REP_SECONDS * FPS))))["elbow"]["l"].x), 1) for i in range(len(poses))])
     out.sort(reverse=True)
     JERKS[clip] = out
     print(f"jerks {clip}:", out[:6] if out else "none")
