@@ -1843,9 +1843,9 @@ def hold_handle(ex_name, pose, adjust=None, c=0.0):
                 key = (ex_name, CUR_LEVEL, s)
                 if key not in FLARE_SIGN:            # decided once: no flipping
                     side = 1 if s == "l" else -1
-                    up = S + Quaternion(axis, 0.3) @ (E - S)
-                    down = S + Quaternion(axis, -0.3) @ (E - S)
-                    FLARE_SIGN[key] = 1 if side * up.x >= side * down.x else -1
+                    e_pos = S + Quaternion(axis, 0.3) @ (E - S)
+                    e_neg = S + Quaternion(axis, -0.3) @ (E - S)
+                    FLARE_SIGN[key] = 1 if side * e_pos.x >= side * e_neg.x else -1
                 E = S + Quaternion(axis, flare * FLARE_SIGN[key]) @ (E - S)
             fore = (W - E).normalized()
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
