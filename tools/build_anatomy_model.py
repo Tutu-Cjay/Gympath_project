@@ -1780,8 +1780,15 @@ def hold_handle(ex_name, pose, adjust=None):
                 n = -n
             R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
-            hint = E0 + (adjust["elbow"][s] if adjust else Vector())
-            E, W = two_bone(S, W_goal, L1, L2, hint if _ == 0 else E)
+            E, W = two_bone(S, W_goal, L1, L2, E0)
+            # the elbow swung out from the body round the shoulder-wrist
+            # line (bigger bodies hold their arms further out)
+            flare = adjust["elbow"][s].x if adjust else 0.0
+            if abs(flare) > 1e-6:
+                axis = (W - S).normalized()
+                side = 1 if s == "l" else -1
+                cands = [S + Quaternion(axis, a) @ (E - S) for a in (flare, -flare)]
+                E = max(cands, key=lambda e: side * e.x)
             fore = (W - E).normalized()
         PALM_LAST[(ex_name, s)] = n
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
@@ -2151,6 +2158,8 @@ ADJUST = {}                  # exercise -> [(c, adjust)]
 _nf = int(round(REP_SECONDS * FPS))
 ADJ_GRID = np.array(sorted({round(contraction(f / _nf), 6) for f in range(0, _nf + 1, 2)}))
 MARGIN = 0.008
+MAX_SHIFT = 0.22             # m the bar may move from its path
+MAX_FLARE = 0.9              # rad the elbows may swing out
 
 
 def _zero_adjust():
@@ -2187,8 +2196,8 @@ def _fix(ex_name, c, adj, tries=16):
             out = Vector((0, nrm.y, nrm.z))
             out = out.normalized() if out.length > 0.3 else Vector((0, -1, 0))
             if a.startswith("uarmfar"):            # elbow into the trunk:
-                elbow[a[-1]] += nrm * step         # out, and the hands forward
-                push += out * step * 0.5
+                elbow[a[-1]] += Vector((step * 6.0, 0, 0))   # swing it out (rad)
+                push += out * step * 0.2           # and the hands a little forward
             elif a.startswith("farmfar"):          # elbow bent into itself:
                 mid = (pose["upperarm_l"].to_translation() + pose["upperarm_r"].to_translation()) / 2
                 bar = (grip_point(pose, "l") + grip_point(pose, "r")) / 2
@@ -2199,8 +2208,10 @@ def _fix(ex_name, c, adj, tries=16):
             break
         push.x = 0.0                               # the bar stays centred
         adj["shift"] += push
+        if adj["shift"].length > MAX_SHIFT:        # never a different exercise
+            adj["shift"] *= MAX_SHIFT / adj["shift"].length
         for s in "lr":
-            adj["elbow"][s] += elbow[s] * 1.5
+            adj["elbow"][s].x = min(adj["elbow"][s].x + elbow[s].x, MAX_FLARE)
     _fix.last = pen
     return max((d for d, _ in pen.values()), default=0.0)
 
@@ -2241,8 +2252,8 @@ def solve_adjust(ex_name):
             print(f"  {ex_name}@{CUR_LEVEL} c={c:.2f}: {left * 100:.1f} cm left after fixing",
                   {f"{a}->{b}": round(d * 100, 1) for (a, b), (d, _) in _fix.last.items()})
         table.append((float(c), adj))
-    print(f"  {ex_name} @{CUR_LEVEL} corrections (cm): bar", [round(a["shift"].length * 100, 1) for _, a in table],
-          "elbow", [round(a["elbow"]["l"].length * 100, 1) for _, a in table])
+    print(f"  {ex_name} @{CUR_LEVEL} corrections: bar (cm)", [round(a["shift"].length * 100, 1) for _, a in table],
+          "elbows out (deg)", [round(math.degrees(a["elbow"]["l"].x)) for _, a in table])
     return table
 
 
