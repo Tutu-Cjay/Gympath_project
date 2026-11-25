@@ -2241,17 +2241,19 @@ def solve_adjust(ex_name):
             idx = np.clip(np.arange(i - len(k) // 2, i + len(k) // 2 + 1), 0, n - 1)
             out[i] = (wide[idx] * k[:, None]).sum(axis=0) / k.sum()
         return [Vector(v) for v in out]
-    shift = smooth([a["shift"] for a in raw], 5, 3)
-    elbows = {s: smooth([a["elbow"][s] for a in raw], 5, 3) for s in "lr"}
-    table = []
-    for i, c in enumerate(ADJ_GRID):
-        # the smoothed correction, topped up where smoothing left a touch
-        adj = dict(shift=shift[i].copy(), elbow={s: elbows[s][i].copy() for s in "lr"})
-        left = _fix(ex_name, c, adj, tries=8)
+    # Smooth by construction: each value becomes the strongest within
+    # REACH grid points, then a Gaussian of at most that reach, so every
+    # point keeps at least the correction it needed and nothing jumps.
+    shift = smooth([a["shift"] for a in raw], 9, 3)
+    elbows = {s: smooth([a["elbow"][s] for a in raw], 9, 3) for s in "lr"}
+    table = [(float(c), dict(shift=shift[i], elbow={s: elbows[s][i] for s in "lr"}))
+             for i, c in enumerate(ADJ_GRID)]
+    for c, adj in table:
+        pen = penetrations(solve_pose(ex_name, c, adj))
+        left = max((d for d, _ in pen.values()), default=0.0)
         if left > 0.005:
             print(f"  {ex_name}@{CUR_LEVEL} c={c:.2f}: {left * 100:.1f} cm left after fixing",
-                  {f"{a}->{b}": round(d * 100, 1) for (a, b), (d, _) in _fix.last.items()})
-        table.append((float(c), adj))
+                  {f"{a}->{b}": round(d * 100, 1) for (a, b), (d, _) in pen.items()})
     print(f"  {ex_name} @{CUR_LEVEL} corrections: bar (cm)", [round(a["shift"].length * 100, 1) for _, a in table],
           "elbows out (deg)", [round(math.degrees(a["elbow"]["l"].x)) for _, a in table])
     return table
@@ -2301,8 +2303,15 @@ def jerk_check(clip, poses):
         for i in range(len(turn)):
             near = [turn[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(turn)]
             spike = turn[i] - sum(near) / len(near)
-            if spike > 6.0:
+            if spike > 4.0:
                 out.append((round(spike, 1), n, 2 * (i + 1)))
+    for s in "lr":                            # the hands' path: no jumps
+        g = [grip_point(p, s) for p in poses]
+        step = [(b - a).length * 100 for a, b in zip(g, g[1:])]
+        for i in range(len(step)):
+            near = [step[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(step)]
+            if step[i] - sum(near) / len(near) > 1.5:
+                out.append((round(step[i] - sum(near) / len(near), 1), f"grip_{s} (cm)", 2 * (i + 1)))
     out.sort(reverse=True)
     JERKS[clip] = out
     print(f"jerks {clip}:", out[:6] if out else "none")
