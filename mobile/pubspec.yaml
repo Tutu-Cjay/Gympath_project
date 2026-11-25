@@ -32,6 +32,8 @@ flutter:
     - assets/logo.png
     - assets/models/anatomy_male.glb
     - assets/models/anatomy_female.glb
+    - assets/models/anatomy_male_shape.json
+    - assets/models/anatomy_female_shape.json
     - assets/tracker/
   # Bundled so text needs no network (the web build would fetch it).
   fonts:

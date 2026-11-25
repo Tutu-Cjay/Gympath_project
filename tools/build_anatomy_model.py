@@ -24,6 +24,7 @@ from it and carry the same licence, and the app shows the credit line.
 Characters, hair and textures: Quaternius, CC0.
 """
 import collections
+import json
 import math
 import os
 import re
@@ -2363,6 +2364,42 @@ def fit_row_seat():
     ROW_SEAT["fit"] = (0.0, y0, top)
     print(f"row bench (shape {SHAPE_LEVELS[CUR_LEVEL]}): pad top {top:.3f} m, foot plate at {sole:.3f} m")
 
+
+# ---------------------------------------------------------- shape gauge ----
+# How much this avatar's body has grown where the arms and the bar meet it,
+# as a share of the fully grown shape the last clip is fitted to. The body
+# sliders are linear morphs, so each skin point's outward growth is a linear
+# function of the slider values; the gauge is the largest growth over the
+# contact skin (trunk, thighs, upper arms), divided by that of the full
+# shape. The app computes it from these coefficients and blends the clips
+# fitted at SHAPE_LEVELS accordingly (anatomy_<sex>_shape.json).
+def write_shape_gauge(path):
+    if not MORPH_D:
+        return
+    contact = np.isin(SEG_OF, [SEGS.index(x) for x in ("torso", "thigh_l", "thigh_r", "uarm_l", "uarm_r")])
+    ix = np.nonzero(contact & _body_v)[0]
+    nrm = vertex_normals(V, F)[ix]
+    A = np.stack([(MORPH_D[m][ix] * nrm).sum(axis=1) for m in MORPH_NAMES], axis=1)
+    A = np.maximum(A, 0.0)                         # only growth outwards counts
+    full = A.sum(axis=1)
+    # the points that can be the largest for some avatar: the largest at
+    # every corner of the slider box (and the strongest few per slider)
+    keep = set(np.argsort(-full)[:150].tolist())
+    for i in range(len(MORPH_NAMES)):
+        keep |= set(np.argsort(-A[:, i])[:30].tolist())
+    for corner in range(1, 2 ** len(MORPH_NAMES)):
+        w = np.array([(corner >> i) & 1 for i in range(len(MORPH_NAMES))], float)
+        keep.add(int(np.argmax(A @ w)))
+    A = A[sorted(keep)]
+    data = dict(sliders=MORPH_NAMES, levels=SHAPE_LEVELS,
+                norm=round(float(full.max()), 6),
+                a=[[round(float(x), 6) for x in row] for row in A])
+    with open(path, "w") as f:
+        json.dump(data, f, separators=(",", ":"))
+    print(f"shape gauge: {len(A)} points -> {path}")
+
+
+write_shape_gauge(os.environ.get("SHAPE_GAUGE_OUT", OUT[:-4] + "_shape.json"))
 
 frames = int(round(REP_SECONDS * FPS))
 scene.frame_start, scene.frame_end = 0, frames

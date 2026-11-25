@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:model_viewer_plus/model_viewer_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewController;
 
@@ -63,6 +64,9 @@ class AnatomyViewerController {
   /// Apply an avatar (skin tone, eye colour and hair). The viewer already follows
   /// the saved avatar; this is for live previews.
   void setAvatar(Avatar a) => _run('avatar(${jsonEncode(a.toJs())})');
+
+  /// The figure's body-shape gauge (assets/models/anatomy_<sex>_shape.json).
+  void _setGauge(Object gauge) => _run('gauge(${jsonEncode(gauge)})');
 
   /// Heat-map mode: every muscle group is tinted by its value (0..1) instead
   /// of by the exercise, and the machine is hidden; null switches back.
@@ -134,6 +138,21 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
   ValueListenable<Avatar> get _avatar =>
       widget.avatar ?? AvatarStore.instance.avatar;
 
+  /// How each figure's body grows with the sliders where the arms and the
+  /// bar meet it (written by tools/build_anatomy_model.py), loaded once.
+  static final Map<AvatarSex, Object> _gauges = {};
+
+  Future<void> _loadGauge(AvatarSex sex) async {
+    if (_gauges.containsKey(sex)) return;
+    try {
+      _gauges[sex] = jsonDecode(
+          await rootBundle.loadString('assets/models/anatomy_${sex.name}_shape.json')) as Object;
+    } catch (_) {
+      return; // an older model without one: the clips go by the largest slider
+    }
+    if (mounted && _sex == sex) widget.controller._setGauge(_gauges[sex]!);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -141,6 +160,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     _avatar.addListener(_onAvatar);
     _sex = _avatar.value.sex;
     _viewer = _build();
+    _loadGauge(_sex);
   }
 
   /// One model per sex (assets/models/anatomy_<sex>.glb). The ModelViewer is
@@ -151,7 +171,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
     if (kIsWeb) stopListening('GP_$_id');
     _id = 'gp${_count++}';
     widget.controller._id = _id;
-    final script = _script(e, _avatar.value.toJs(), _id);
+    final script = _script(e, _avatar.value.toJs(), _id, _gauges[_avatar.value.sex]);
     if (kIsWeb) {
       // In a browser the page script is not run from the model-viewer's
       // HTML: start it here (it waits for its element) and listen to it.
@@ -200,6 +220,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
         _sex = a.sex;
         _viewer = _build();
       });
+      _loadGauge(a.sex);
     } else {
       widget.controller.setAvatar(a);
     }
@@ -224,7 +245,9 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
 
   /// Page script: tints the muscle materials every frame from the rep time and
   /// reports that time back. The timeline numbers mirror [RepTimeline].
-  static String _script(CableExercise initial, Map<String, Object> avatar, String id) => '''
+  static String _script(CableExercise initial, Map<String, Object> avatar, String id,
+          Object? gauge) =>
+      '''
 (function () {
 const ID = ${jsonEncode(id)};
 function start(mv) {
@@ -250,13 +273,97 @@ function start(mv) {
     return [0, 1, 2].map(function (i) { return a[i] + (b[i] - a[i]) * t; });
   }
   function restingRegion() { return skinOn ? avatar.skin : BARE; }
-  // Each exercise has a clip per fitted body shape (Avatar.shapeLevel).
-  function clip(name) {
-    const L = avatar.level || 0;
-    const fitted = L ? name + '@' + L : name;
+  // Body shape: each exercise has clips fitted (no part passing into
+  // another) to bodies grown to gauge.levels: "Name", "Name@1", "Name@2".
+  // The sliders are linear morphs, so how far this body has grown where the
+  // arms and the bar meet it is a linear function of them per skin point;
+  // its largest value over the contact skin, as a share of the fully grown
+  // shape's, places this body between two fitted clips, which play blended
+  // by that share.
+  let gauge = ${jsonEncode(gauge)};
+  let extra = null, extraName = null, lastBlend = '', pendingTime = null;
+  function bulk() {
+    const b = avatar.body || {};
+    let m = 0;
+    if (!gauge) {                       // no gauge: the largest slider
+      for (const k in b) m = Math.max(m, b[k] || 0);
+      return Math.min(1, m);
+    }
+    for (let r = 0; r < gauge.a.length; r++) {
+      const row = gauge.a[r];
+      let t = 0;
+      for (let i = 0; i < row.length; i++) {
+        t += row[i] * Math.max(0, b[gauge.sliders[i]] || 0);
+      }
+      if (t > m) m = t;
+    }
+    return Math.min(1, m / gauge.norm);
+  }
+  function blendPair(name) {
+    const L = gauge ? gauge.levels : [0, 0.5, 1];
+    const nm = function (k) { return k === 0 ? name : name + '@' + k; };
     const have = mv.availableAnimations || [];
-    // a model without the fitted clips plays the base one
-    return have.length && have.indexOf(fitted) < 0 ? name : fitted;
+    if (have.length && have.indexOf(nm(1)) < 0) return { a: name, b: null, f: 0 };
+    const v = bulk();
+    let k = 0;
+    while (k < L.length - 2 && v > L[k + 1]) k++;
+    const f = Math.min(1, Math.max(0, (v - L[k]) / (L[k + 1] - L[k])));
+    return { a: nm(k), b: nm(k + 1), f: f };
+  }
+  function clip(name) { return blendPair(name).a; }
+  function sceneOf() {
+    const sym = Object.getOwnPropertySymbols(mv).find(function (s) {
+      return s.description === 'scene';
+    });
+    return sym ? mv[sym] : null;
+  }
+  // Every frame: the second clip plays alongside model-viewer's own, at the
+  // same time, the two weighted to the blend (model-viewer stops extra
+  // actions when it switches clips, so it is put back here).
+  function blend() {
+    try {
+      const sc = sceneOf();
+      if (!sc || !sc.mixer || !sc.animationsByName || !mv.model) return;
+      const p = blendPair(cfg.animation);
+      if (mv.animationName !== p.a) {
+        // the body moved to the next pair of fitted clips (where both give
+        // the same pose): carry on from the same moment of the rep
+        pendingTime = mv.currentTime;
+        mv.animationName = p.a;
+        return;
+      }
+      const main = sc.currentAnimationAction;
+      if (!main || main.getClip().name !== p.a) return;
+      if (pendingTime !== null) { mv.currentTime = pendingTime; pendingTime = null; }
+      const want = p.b && p.f > 0.001 ? p.b : null;
+      if (extra && extraName !== want) { extra.stop(); extra = null; extraName = null; }
+      if (want && !extra) {
+        const c = sc.animationsByName.get(want);
+        if (!c) return;
+        extra = sc.mixer.clipAction(c, sc);
+        extraName = want;
+      }
+      if (extra) {
+        if (!extra.isRunning()) {
+          extra.reset();
+          extra.setLoop(main.loop, Infinity);
+          extra.enabled = true;
+          extra.play();
+        }
+        extra.timeScale = main.timeScale;
+        extra.time = main.time;
+        extra.setEffectiveWeight(p.f);
+        main.setEffectiveWeight(1 - p.f);
+      } else {
+        main.setEffectiveWeight(1);
+      }
+      const key = p.a + '|' + p.b + '|' + p.f.toFixed(3);
+      if (key !== lastBlend) {          // paused: show the new blend now
+        lastBlend = key;
+        sc.mixer.update(0);
+        if (sc.queueRender) sc.queueRender();
+      }
+    } catch (e) { /* keep model-viewer's own clip */ }
   }
   // Body shape: the model's morph targets, set from the avatar's sliders
   // (model-viewer has no API for them, so through its three.js scene).
@@ -370,6 +477,7 @@ function start(mv) {
       if (Math.abs(target - shown) < 0.002) shown = target;
       mv.currentTime = timeFor(shown) * (mv.duration || 4);
     }
+    blend();
     paint();
     if (!mv.isConnected) return;        // its view was closed
     if (now - lastSent > 90 && channel()) {
@@ -390,7 +498,7 @@ function start(mv) {
   }
   const api = {
     exercise: function (c) {
-      cfg = c; focus = null; last = {};
+      cfg = c; focus = null; last = {}; pendingTime = null;
       mv.animationName = clip(c.animation);
       mv.currentTime = 0;
       mv.cameraOrbit = c.orbit;
@@ -409,17 +517,8 @@ function start(mv) {
     focus: function (g) { focus = g; last = {}; },
     heat: function (h) { heat = h; last = {}; machine(!h); },
     skin: function (on) { skinOn = on; dressDirty = true; },
-    avatar: function (a) {
-      const before = avatar.level || 0;
-      avatar = a; dressDirty = true; applyBody();
-      if ((a.level || 0) !== before) {
-        // the body changed enough for another fitted clip: same moment of it
-        const t = mv.currentTime;
-        mv.animationName = clip(cfg.animation);
-        mv.currentTime = t;
-        resume();
-      }
-    },
+    avatar: function (a) { avatar = a; dressDirty = true; applyBody(); },
+    gauge: function (g) { gauge = g; },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
   };
