@@ -182,10 +182,25 @@ MACHINE = {
     "CableChestFly": dict(p1=(0.98, 0.25, 1.95), p2=(-0.98, 0.25, 1.95), stack=(0.98, 0.25), bar=0),
     "FacePull": dict(p1=(0, -1.35, 1.62), p2=(0, -1.62, 2.05), stack=(0, -1.62), bar=None),
 }
+# How the hands hold the handle. "fixed": a rigid bar, the hands stay the
+# same distance apart all through the rep (that at the start), the arms
+# reach it by IK; "follow": a rope / single handles, the hands move freely.
+# palm: which way the palms face at the start (overhand / underhand); the
+# hand turns so the handle lies across the palm, in the closed fingers.
+GRIP = {
+    "LatPulldown": dict(width="fixed", palm=(0, -1, 0)),
+    "SeatedCableRow": dict(width="fixed", palm=(0, 0, -1)),
+    "TricepPushdown": dict(width="fixed", palm=(0, 0, -1)),
+    "CableBicepCurl": dict(width="fixed", palm=(0, -1, 0)),
+    "FacePull": dict(width="follow", palm=(0, 0, -1)),
+    "CableChestFly": None,                 # one handle per hand, as it falls
+}
+BAR_RADIUS = 0.016
 STACK_TRAVEL = 0.32          # how far the weight stack rises at full contraction
 STACK_BASE, STACK_HEIGHT = 0.10, 0.36
 PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
-              "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b"]
+              "prop_frame", "prop_pulley_a", "prop_pulley_b", "prop_seat_a", "prop_seat_b",
+              "prop_handle_l", "prop_handle_r"]
 STATIC_MATERIALS = (["skin"] + [f"neck{i}" for i in range(1, NECK_BANDS + 1)]
                     + ["head"] + FACE_MATERIALS + ["shorts", "equipment", "cable", "tracker", "pad"])
 
@@ -1428,7 +1443,10 @@ def rod_mesh(a, b, radius, sides=10):
 
 # Each prop is modelled around the origin and moved by its own bone.
 PROPS = [
-    ("prop_bar", "equipment", rod_mesh((0, -0.5, 0), (0, 0.5, 0), 0.014)),
+    ("prop_bar", "equipment", rod_mesh((0, -0.5, 0), (0, 0.5, 0), BAR_RADIUS, 14)),
+    # single handles (chest fly), one in each hand
+    ("prop_handle_l", "equipment", rod_mesh((0, -0.07, 0), (0, 0.07, 0), BAR_RADIUS, 12)),
+    ("prop_handle_r", "equipment", rod_mesh((0, -0.07, 0), (0, 0.07, 0), BAR_RADIUS, 12)),
     ("prop_cable_a", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
     ("prop_cable_b", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
     ("prop_cable_c", "cable", rod_mesh((0, 0, 0), (0, 1, 0), 0.004, 6)),
@@ -1672,6 +1690,117 @@ def place(start, end=None, scale=None):
 
 
 HIDDEN = Matrix.Diagonal((1e-4, 1e-4, 1e-4, 1))
+# Where the handle sits in each hand, rest pose: the hollow of the closed
+# fingers (q_body.FINGER_CURL), the palm normal and the hand's axis.
+if QBODY:
+    GRIP0 = {}
+    for s_ in "lr":
+        g_ = QCHAR.grip_frame(s_, bind=True)
+        GRIP0[s_] = dict(centre=Vector(g_["centre"]), n=Vector(g_["n"]), h=Vector(g_["h"]))
+        print(f"grip {s_}: hollow radius {g_['radius'] * 100:.1f} cm")
+else:
+    GRIP0 = {s_: dict(centre=Vector(J[f"wrist_{s_}"]) + 0.075 * (Vector(J[f"handtip_{s_}"]) - Vector(J[f"wrist_{s_}"])).normalized(),
+                      n=Vector((0, 0, -1)), h=(Vector(J[f"handtip_{s_}"]) - Vector(J[f"wrist_{s_}"])).normalized())
+             for s_ in "lr"}
+
+
+def grip_point(pose, s):
+    """The handle's place in hand s, posed."""
+    return (pose[f"hand_{s}"] @ REST[f"hand_{s}"].inverted()) @ GRIP0[s]["centre"]
+
+
+def frame(h, n):
+    """Rotation whose columns are h, n and h x n (orthonormalised)."""
+    h = h.normalized()
+    n = (n - h * n.dot(h)).normalized()
+    return Matrix((h, n, h.cross(n))).transposed()
+
+
+def two_bone(S, W, L1, L2, E_hint):
+    """Elbow and (reachable) wrist for shoulder S, wrist target W, bone
+    lengths L1, L2; the elbow bends towards E_hint."""
+    d = W - S
+    dist = min(max(d.length, abs(L1 - L2) + 1e-4), L1 + L2 - 1e-4)
+    dn = d.normalized()
+    a = (L1 * L1 - L2 * L2 + dist * dist) / (2 * dist)
+    hgt = math.sqrt(max(L1 * L1 - a * a, 0.0))
+    pole = E_hint - S
+    pole = pole - dn * pole.dot(dn)
+    if pole.length < 1e-6:
+        pole = Vector((0, 1, 0)) - dn * dn.y
+    pole.normalize()
+    return S + dn * a + pole * hgt, S + dn * dist
+
+
+BAR_WIDTH = {}       # exercise -> hand distance on a fixed bar (from its start pose)
+PALM_LAST = {}       # (exercise, side) -> last palm normal, for continuity
+IK_MISS = collections.defaultdict(float)
+
+
+def hold_handle(ex_name, pose):
+    """Put both hands on the handle: the handle across each palm in the
+    closed fingers, and on a fixed bar the hands always the same distance
+    apart (the arms reach it by two-bone IK; the elbows keep bending the way
+    the exercise's arm directions bend them)."""
+    g = GRIP.get(ex_name)
+    if not g:
+        return
+    fk = {s: grip_point(pose, s) for s in "lr"}
+    mid = (fk["l"] + fk["r"]) / 2
+    across = (fk["l"] - fk["r"]).normalized()
+    if g["width"] == "fixed":
+        if ex_name not in BAR_WIDTH:
+            BAR_WIDTH[ex_name] = (fk["l"] - fk["r"]).length
+        half = BAR_WIDTH[ex_name] / 2
+        target = {"l": mid + across * half, "r": mid - across * half}
+    else:
+        target = fk
+    for s in "lr":
+        up, lo, hand = f"upperarm_{s}", f"lowerarm_{s}", f"hand_{s}"
+        S = pose[up].to_translation()
+        E0 = pose[lo].to_translation()
+        W0 = pose[hand].to_translation()
+        L1 = (REST[lo].to_translation() - REST[up].to_translation()).length
+        L2 = (REST[hand].to_translation() - REST[lo].to_translation()).length
+        rest_h, rest_n = GRIP0[s]["h"], GRIP0[s]["n"]
+        off0 = GRIP0[s]["centre"] - REST[hand].to_translation()
+        fore = (W0 - E0).normalized()
+        E, W = E0, W0
+        for _ in range(4):
+            # hand along the forearm, square to the handle; the palm the
+            # way the grip says, without flipping between frames
+            h = (fore - across * fore.dot(across)).normalized()
+            n = h.cross(across).normalized()
+            prev = PALM_LAST.get((ex_name, s), Vector(g["palm"]))
+            if n.dot(prev) < 0:
+                n = -n
+            R = frame(h, n) @ frame(rest_h, rest_n).transposed()
+            W_goal = target[s] - R @ off0
+            E, W = two_bone(S, W_goal, L1, L2, E0 if _ == 0 else E)
+            fore = (W - E).normalized()
+        PALM_LAST[(ex_name, s)] = n
+        IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
+        # upper arm and forearm swung onto the solved elbow and wrist
+        clav = f"clavicle_{s}"
+        base_u = pose[clav] @ REST[clav].inverted() @ REST[up]
+        cur = (base_u.to_3x3() @ Vector((0, 1, 0))).normalized()
+        rot_u = cur.rotation_difference((E - S).normalized()).to_matrix() @ base_u.to_3x3()
+        pose[up] = Matrix.Translation(S) @ rot_u.to_4x4()
+        base_l = pose[up] @ REST[up].inverted() @ REST[lo]
+        cur = (base_l.to_3x3() @ Vector((0, 1, 0))).normalized()
+        rot_l = cur.rotation_difference(fore).to_matrix() @ base_l.to_3x3()
+        rot_h = R @ REST[hand].to_3x3()
+        # the forearm takes half the hand's turn about its axis (the wrist
+        # alone would wring the skin)
+        carried = rot_l @ REST[lo].to_3x3().inverted() @ REST[hand].to_3x3()
+        q = (rot_h @ carried.inverted()).to_quaternion()
+        v = Vector((q.x, q.y, q.z))
+        tw = Quaternion((q.w, *(fore * v.dot(fore))))
+        if tw.magnitude > 1e-9:
+            tw.normalize()
+            rot_l = Quaternion().slerp(tw, 0.5).to_matrix() @ rot_l
+        pose[lo] = Matrix.Translation(base_l.to_translation()) @ rot_l.to_4x4()
+        pose[hand] = Matrix.Translation(W) @ rot_h.to_4x4()
 P0 = REST["pelvis"].to_translation()
 HIP_REST = Vector(J["hip_l"])
 SHANK = (Vector(J["ankle_l"]) - Vector(J["knee_l"])).length
@@ -1680,10 +1809,7 @@ SHANK = (Vector(J["ankle_l"]) - Vector(J["knee_l"])).length
 def solve_props(ex_name, pose, c, hip_z):
     """Where the machine parts are for this pose."""
     cfg = MACHINE[ex_name]
-    grips = {}
-    for s in "lr":
-        m = pose[f"hand_{s}"]
-        grips[s] = m.to_translation() + (m.to_3x3() @ Vector((0, 1, 0))).normalized() * 0.075
+    grips = {s: grip_point(pose, s) for s in "lr"}
     mid = (grips["l"] + grips["r"]) / 2
     p1, p2 = Vector(cfg["p1"]), Vector(cfg["p2"])
     foot = Vector((cfg["stack"][0], cfg["stack"][1], 0))
@@ -1695,10 +1821,16 @@ def solve_props(ex_name, pose, c, hip_z):
     if cfg["bar"] == 0:                       # one cable per hand (chest fly)
         out["prop_cable_a"] = place(grips["l"], p1)
         out["prop_cable_c"] = place(grips["r"], p2)
+        for s in "lr":                        # a handle across each palm
+            rot = (pose[f"hand_{s}"] @ REST[f"hand_{s}"].inverted()).to_3x3()
+            across_palm = rot @ GRIP0[s]["n"].cross(GRIP0[s]["h"])
+            turn = Vector((0, 1, 0)).rotation_difference(across_palm.normalized()).to_matrix().to_4x4()
+            out[f"prop_handle_{s}"] = Matrix.Translation(grips[s]) @ turn
         out["prop_cable_b"] = place(p1 + Vector((0, 0, 0.05)), top)
     else:
         across = grips["l"] - grips["r"]
-        length = cfg["bar"] if cfg["bar"] else across.length + 0.06
+        # a bar a little wider than the hands' grip, at least its own length
+        length = max(cfg["bar"], across.length + 0.22) if cfg["bar"] else across.length + 0.06
         rot = Vector((0, 1, 0)).rotation_difference(across.normalized()).to_matrix().to_4x4()
         out["prop_bar"] = Matrix.Translation(mid) @ rot @ Matrix.Diagonal((1, length, 1, 1))
         out["prop_cable_a"] = place(mid, p1)
@@ -1759,6 +1891,7 @@ def solve_pose(ex_name, c):
             swing = current.rotation_difference(aims[name]).to_matrix()
             m = here @ (swing @ base.to_3x3()).to_4x4()
         pose[name] = m
+    hold_handle(ex_name, pose)
     # Helper bones turn half as far as the bone below their joint.
     for h, (above, below, _, _) in HELPERS.items():
         base_b = pose[above] @ REST[above].inverted() @ REST[below]
@@ -1829,6 +1962,8 @@ bpy.ops.export_scene.gltf(
     export_lights=False,
     export_image_format="JPEG" if QBODY else "AUTO",
 )
+print("bar widths:", {k: round(v, 3) for k, v in BAR_WIDTH.items()},
+      "IK reach shortfall (m):", {k: round(v, 3) for k, v in IK_MISS.items()})
 print("wrote", OUT, round(os.path.getsize(OUT) / 1e6, 2), "MB;",
       len(mesh.vertices), "vertices,", len(mesh.polygons), "triangles")
 
@@ -1859,12 +1994,20 @@ if PREVIEW_DIR:
     target = Vector((0, 0.0, float(os.environ.get("PREVIEW_Z", "0.95"))))
     shots = os.environ.get("PREVIEW_SHOTS", "LatPulldown:0:0.5,LatPulldown:180:0.5").split(",")
     for shot in shots:
-        ex_name, yaw, t = shot.split(":")
+        ex_name, yaw, t, *close = shot.split(":")
+        target = Vector((0, 0.0, float(os.environ.get("PREVIEW_Z", "0.95"))))
+        dist = 4.6
+        if close and close[0] in ("l", "r"):  # name:yaw:t:hand:distance
+            target = grip_point(solve_pose(ex_name, contraction(float(t))), close[0])
+            dist = float(close[1])
+        elif close:                           # name:yaw:t:x:y:z:distance
+            target = Vector(tuple(float(x) for x in close[:3]))
+            dist = float(close[3])
         for track in arm.animation_data.nla_tracks:
             track.mute = track.name != ex_name
         a = math.radians(float(yaw))
-        cam.location = target + Vector((math.sin(a) * 4.6, -math.cos(a) * 4.6, 0.35))
+        cam.location = target + Vector((math.sin(a) * dist, -math.cos(a) * dist, 0.35 * dist / 4.6))
         cam.rotation_euler = (target - cam.location).to_track_quat("-Z", "Y").to_euler()
         scene.frame_set(int(round(float(t) * frames)))
-        scene.render.filepath = os.path.join(PREVIEW_DIR, f"{ex_name}_{yaw}_{t}.png")
+        scene.render.filepath = os.path.join(PREVIEW_DIR, f"{ex_name}_{yaw}_{t}{'_close' if close else ''}.png")
         bpy.ops.render.render(write_still=True)
