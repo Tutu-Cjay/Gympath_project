@@ -1721,9 +1721,17 @@ def two_bone(S, W, L1, L2, E_hint):
     """Elbow and (reachable) wrist for shoulder S, wrist target W, bone
     lengths L1, L2; the elbow bends towards E_hint."""
     d = W - S
-    # never locked quite straight: a slight bend lets the elbow stay clear
-    # of the trunk (and real arms keep one under load)
-    dist = min(max(d.length, abs(L1 - L2) + 1e-4), (L1 + L2) * 0.985)
+    # Soft reach: near full extension a two-bone arm's elbow angle changes
+    # ever faster for the same hand travel, then stops dead at the limit (a
+    # snap). Past 92% of the arm's length the reach eases in exponentially
+    # towards 98.5% instead, so the arm straightens smoothly and never quite
+    # locks (a slight bend also lets the elbow stay clear of the trunk).
+    full = L1 + L2
+    soft, hard = 0.92 * full, 0.985 * full
+    reach = d.length
+    if reach > soft:
+        reach = soft + (hard - soft) * (1 - math.exp(-(reach - soft) / (hard - soft)))
+    dist = max(reach, abs(L1 - L2) + 1e-4)
     dn = d.normalized()
     a = (L1 * L1 - L2 * L2 + dist * dist) / (2 * dist)
     hgt = math.sqrt(max(L1 * L1 - a * a, 0.0))
