@@ -2405,6 +2405,11 @@ if PREVIEW_DIR:
             dist = float(close[3])
         for track in arm.animation_data.nla_tracks:
             track.mute = track.name != ex_name
+        # "Name@k": the clip fitted to shape level k, shown on that body
+        level = int(ex_name.split("@")[1]) if "@" in ex_name else 0
+        if body.data.shape_keys:
+            for kb in body.data.shape_keys.key_blocks[1:]:
+                kb.value = SHAPE_LEVELS[level]
         a = math.radians(float(yaw))
         cam.location = target + Vector((math.sin(a) * dist, -math.cos(a) * dist, 0.35 * dist / 4.6))
         cam.rotation_euler = (target - cam.location).to_track_quat("-Z", "Y").to_euler()
