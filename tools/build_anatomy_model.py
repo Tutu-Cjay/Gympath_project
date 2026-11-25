@@ -194,9 +194,14 @@ GRIP = {
     "TricepPushdown": dict(width="fixed", palm=(0, 0, -1)),
     "CableBicepCurl": dict(width="fixed", palm=(0, -1, 0)),
     "FacePull": dict(width="follow", palm=(0, 0, -1)),
-    "CableChestFly": None,                 # one handle per hand, as it falls
+    # one handle per hand: the hands move as the arms swing, the handles
+    # turn with them ("free": only moved clear of a bigger body)
+    "CableChestFly": dict(width="free", palm=None),
 }
 BAR_RADIUS = 0.016
+# A bigger body holds the handle wider (still the same width all through
+# the rep): the grip widens by this share of itself at the fullest shape.
+GRIP_WIDEN = 0.35
 STACK_TRAVEL = 0.32          # how far the weight stack rises at full contraction
 STACK_BASE, STACK_HEIGHT = 0.10, 0.36
 PROP_BONES = ["prop_bar", "prop_cable_a", "prop_cable_b", "prop_cable_c", "prop_stack",
@@ -1760,13 +1765,15 @@ def hold_handle(ex_name, pose, adjust=None):
     mid = (fk["l"] + fk["r"]) / 2
     across = (fk["l"] - fk["r"]).normalized()
     shift = adjust["shift"] if adjust else Vector()
+    widen = 1 + GRIP_WIDEN * SHAPE_LEVELS[CUR_LEVEL] if MORPH_D else 1.0
     if g["width"] == "fixed":
         if ex_name not in BAR_WIDTH:
             BAR_WIDTH[ex_name] = (fk["l"] - fk["r"]).length
-        half = BAR_WIDTH[ex_name] / 2
+        half = BAR_WIDTH[ex_name] * widen / 2
         target = {"l": mid + shift + across * half, "r": mid + shift - across * half}
     else:
-        target = {s: fk[s] + shift for s in "lr"}
+        spread = (fk["l"] - fk["r"]).length * (widen - 1) / 2
+        target = {"l": fk["l"] + shift + across * spread, "r": fk["r"] + shift - across * spread}
     for s in "lr":
         up, lo, hand = f"upperarm_{s}", f"lowerarm_{s}", f"hand_{s}"
         S = pose[up].to_translation()
@@ -1779,21 +1786,24 @@ def hold_handle(ex_name, pose, adjust=None):
         fore = (W0 - E0).normalized()
         n_fk = ((pose[hand] @ REST[hand].inverted()).to_3x3() @ rest_n).normalized()
         E, W = E0, W0
+        R_fk = (pose[hand] @ REST[hand].inverted()).to_3x3()
         for _ in range(4):
-            # hand along the forearm, square to the handle; the palm the
-            # way the grip says, without flipping between frames
-            h = (fore - across * fore.dot(across)).normalized()
-            n = h.cross(across).normalized()
-            # The palm's side, the same for every call at the same c (no
-            # memory of earlier calls, so the rep loops without a turn):
-            # relative to where the arm motion alone would turn the palm,
-            # fixed once at the rep's start to the grip's way (overhand...).
-            key = (ex_name, s)
-            if key not in PALM_K:
-                PALM_K[key] = 1 if n.dot(Vector(g["palm"])) * n.dot(n_fk) >= 0 else -1
-            if n.dot(n_fk) * PALM_K[key] < 0:
-                n = -n
-            R = frame(h, n) @ frame(rest_h, rest_n).transposed()
+            if g["width"] == "free":               # the hand keeps its turn
+                R = R_fk
+            else:
+                # hand along the forearm, square to the handle
+                h = (fore - across * fore.dot(across)).normalized()
+                n = h.cross(across).normalized()
+                # The palm's side, the same for every call at the same c (no
+                # memory of earlier calls, so the rep loops without a turn):
+                # relative to where the arm motion alone would turn the
+                # palm, fixed once at the rep's start to the grip's way.
+                key = (ex_name, s)
+                if key not in PALM_K:
+                    PALM_K[key] = 1 if n.dot(Vector(g["palm"])) * n.dot(n_fk) >= 0 else -1
+                if n.dot(n_fk) * PALM_K[key] < 0:
+                    n = -n
+                R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
             E, W = two_bone(S, W_goal, L1, L2, E0)
             # the elbow swung out from the body round the shoulder-wrist
