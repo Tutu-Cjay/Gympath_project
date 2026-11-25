@@ -1722,7 +1722,7 @@ def frame(h, n):
     return Matrix((h, n, h.cross(n))).transposed()
 
 
-def two_bone(S, W, L1, L2, E_hint):
+def two_bone(S, W, L1, L2, E_hint, bias=None):
     """Elbow and (reachable) wrist for shoulder S, wrist target W, bone
     lengths L1, L2; the elbow bends towards E_hint."""
     d = W - S
@@ -1740,7 +1740,10 @@ def two_bone(S, W, L1, L2, E_hint):
     dn = d.normalized()
     a = (L1 * L1 - L2 * L2 + dist * dist) / (2 * dist)
     hgt = math.sqrt(max(L1 * L1 - a * a, 0.0))
-    pole = E_hint - S
+    # Which way the elbow bends: towards the hint, plus a small steady bias
+    # (out and down): with the arm near straight the hint alone points
+    # almost along the arm, and its little sideways part swings about.
+    pole = E_hint - S + (bias if bias is not None else Vector())
     pole = pole - dn * pole.dot(dn)
     if pole.length < 1e-6:
         pole = Vector((0, 1, 0)) - dn * dn.y
@@ -1764,10 +1767,10 @@ def palm_table(ex_name):
     key = (ex_name, CUR_LEVEL)
     if key in PALM_TABLE or not GRIP.get(ex_name) or GRIP[ex_name]["width"] == "free":
         return
-    _SWEEP = {"prev": {}, "rec": {"l": [], "r": []}}
+    _SWEEP = {"prev": {}, "rec": {"l": [], "r": []}, "twist": {"l": [], "r": []}, "tprev": {}}
     for c in PALM_GRID:
         solve_pose(ex_name, float(c), _zero_adjust())
-    PALM_TABLE[key] = _SWEEP["rec"]
+    PALM_TABLE[key] = dict(_SWEEP["rec"], twist=_SWEEP["twist"])
     _SWEEP = None
 
 
@@ -1834,7 +1837,8 @@ def hold_handle(ex_name, pose, adjust=None, c=0.0):
                 n = n * sign
                 R = frame(h, n) @ frame(rest_h, rest_n).transposed()
             W_goal = target[s] - R @ off0
-            E, W = two_bone(S, W_goal, L1, L2, E0)
+            E, W = two_bone(S, W_goal, L1, L2, E0,
+                            Vector((0.04 if s == "l" else -0.04, 0.0, -0.03)))
             # the elbow swung out from the body round the shoulder-wrist
             # line (bigger bodies hold their arms further out)
             flare = adjust["elbow"][s].x if adjust else 0.0
@@ -1849,6 +1853,9 @@ def hold_handle(ex_name, pose, adjust=None, c=0.0):
                 E = S + Quaternion(axis, flare * FLARE_SIGN[key]) @ (E - S)
             fore = (W - E).normalized()
         IK_MISS[ex_name] = max(IK_MISS[ex_name], (W - W_goal).length)
+        if os.environ.get("DEBUG_IK") == ex_name and s == "l" and _SWEEP is None:
+            print(f"ik c={c:.3f} reach={(W_goal - S).length / (L1 + L2):.3f} "
+                  f"E=({E.x:.3f},{E.y:.3f},{E.z:.3f}) W=({W.x:.3f},{W.y:.3f},{W.z:.3f}) E0=({E0.x:.3f},{E0.y:.3f},{E0.z:.3f})")
         # upper arm and forearm swung onto the solved elbow and wrist
         clav = f"clavicle_{s}"
         base_u = pose[clav] @ REST[clav].inverted() @ REST[up]
@@ -1864,10 +1871,20 @@ def hold_handle(ex_name, pose, adjust=None, c=0.0):
         carried = rot_l @ REST[lo].to_3x3().inverted() @ REST[hand].to_3x3()
         q = (rot_h @ carried.inverted()).to_quaternion()
         v = Vector((q.x, q.y, q.z))
-        tw = Quaternion((q.w, *(fore * v.dot(fore))))
-        if tw.magnitude > 1e-9:
-            tw.normalize()
-            rot_l = Quaternion().slerp(tw, 0.5).to_matrix() @ rot_l
+        theta = 2 * math.atan2(v.dot(fore), q.w)            # turn about the forearm
+        theta = (theta + math.pi) % (2 * math.pi) - math.pi
+        # the same branch all through the rep (past half a turn the plain
+        # angle would jump to the other side): unwrapped in the sweep
+        if _SWEEP is not None and "twist" in _SWEEP:
+            prev = _SWEEP["tprev"].get(s, theta)
+            theta = prev + ((theta - prev + math.pi) % (2 * math.pi) - math.pi)
+            _SWEEP["tprev"][s] = theta
+            _SWEEP["twist"][s].append((c, theta))
+        elif (ex_name, CUR_LEVEL) in PALM_TABLE and g["width"] != "free":
+            rec = PALM_TABLE[(ex_name, CUR_LEVEL)]["twist"][s]
+            ref = rec[int(np.clip(round(c * (len(PALM_GRID) - 1)), 0, len(rec) - 1))][1]
+            theta += 2 * math.pi * round((ref - theta) / (2 * math.pi))
+        rot_l = Quaternion(fore, theta / 2).to_matrix() @ rot_l
         pose[lo] = Matrix.Translation(base_l.to_translation()) @ rot_l.to_4x4()
         pose[hand] = Matrix.Translation(W) @ rot_h.to_4x4()
 P0 = REST["pelvis"].to_translation()
@@ -2390,6 +2407,7 @@ def jerk_check(clip, poses):
         print(f"trace {clip} {n}:", turn)
         print(f"trace {clip} c:", [round(contraction(2 * i / int(round(REP_SECONDS * FPS))), 3) for i in range(len(poses))])
         if ADJUST.get((clip.split("@")[0], CUR_LEVEL)):
+            print("trace shift:", [tuple(round(v * 100, 1) for v in adjust_at(clip.split("@")[0], contraction(2 * i / int(round(REP_SECONDS * FPS))))["shift"]) for i in range(len(poses))])
             print("trace flare:", [round(math.degrees(adjust_at(clip.split("@")[0], contraction(2 * i / int(round(REP_SECONDS * FPS))))["elbow"]["l"].x), 1) for i in range(len(poses))])
     out.sort(reverse=True)
     JERKS[clip] = out
