@@ -1877,6 +1877,28 @@ PAD_RODS = [("prop_seat_a", (-0.26, -0.30, 0.24), (0.26, -0.30, 0.24), 0.05)]
 SEAT_SQUASH = 0.015          # a seat gives a little under the body
 _Vh = np.c_[V, np.ones(len(V))]
 
+# Body shapes the animation is fitted to: the avatar's body sliders (glTF
+# morph targets) all at 0, half and full. Each exercise gets one clip per
+# level ("Name", "Name@1", "Name@2"); the app plays the one for the
+# smallest level that holds its avatar, so nothing passes into anything
+# whatever the sliders (a slimmer body only stands a little clearer).
+SHAPE_LEVELS = [0.0, 0.5, 1.0]
+MORPH_D = {}
+if QBODY and BODY_MORPHS:
+    for _name in MORPH_NAMES:
+        MORPH_D[_name] = np.zeros_like(V)
+        for _start, _d in BODY_MORPHS:
+            MORPH_D[_name][_start:_start + len(_d[_name])] = _d[_name]
+CUR_LEVEL = 0
+
+
+def set_shape(level):
+    """Check collisions on the body with every slider at SHAPE_LEVELS[level]."""
+    global _Vh, CUR_LEVEL
+    CUR_LEVEL = level
+    v = V + sum((SHAPE_LEVELS[level] * d for d in MORPH_D.values()), np.zeros_like(V))
+    _Vh = np.c_[v, np.ones(len(V))]
+
 
 def posed_verts(pose):
     """Every vertex of the figure and machine in this pose (linear blend)."""
@@ -2136,7 +2158,7 @@ def _zero_adjust():
 
 
 def adjust_at(ex_name, c):
-    table = ADJUST.get(ex_name)
+    table = ADJUST.get((ex_name, CUR_LEVEL))
     if not table:
         return None
     cs = [t for t, _ in table]
@@ -2215,9 +2237,9 @@ def solve_adjust(ex_name):
         adj = dict(shift=shift[i].copy(), elbow={s: elbows[s][i].copy() for s in "lr"})
         left = _fix(ex_name, c, adj, tries=8)
         if left > 0.005:
-            print(f"  {ex_name} c={c:.2f}: {left * 100:.1f} cm left after fixing")
+            print(f"  {ex_name}@{CUR_LEVEL} c={c:.2f}: {left * 100:.1f} cm left after fixing")
         table.append((float(c), adj))
-    print(f"  {ex_name} corrections (cm): bar", [round(a["shift"].length * 100, 1) for _, a in table],
+    print(f"  {ex_name} @{CUR_LEVEL} corrections (cm): bar", [round(a["shift"].length * 100, 1) for _, a in table],
           "elbow", [round(a["elbow"]["l"].length * 100, 1) for _, a in table])
     return table
 
@@ -2239,26 +2261,32 @@ def fit_row_seat():
     under = (np.abs(body[:, 0]) < 0.17) & (body[:, 1] > y0 - 0.525) & (body[:, 1] < y0 + 0.425)
     top = body[under, 2].min() + 0.006
     ROW_SEAT["fit"] = (0.0, y0, top)
-    print(f"row bench: pad top {top:.3f} m, foot plate at {sole:.3f} m")
+    print(f"row bench (shape {SHAPE_LEVELS[CUR_LEVEL]}): pad top {top:.3f} m, foot plate at {sole:.3f} m")
 
-
-if QBODY:
-    fit_row_seat()
 
 frames = int(round(REP_SECONDS * FPS))
 scene.frame_start, scene.frame_end = 0, frames
 arm.animation_data_create()
 actions = {}
-for ex_name, ex in EXERCISES.items():
-    only = os.environ.get("COLLISIONS_ONLY")
-    if os.environ.get("COLLISIONS", "1") == "1" and (not only or ex_name in only.split(",")):
-        ADJUST[ex_name] = solve_adjust(ex_name)
-    action = bpy.data.actions.new(ex_name)
-    arm.animation_data.action = action
-    last = {}
-    for f in range(0, frames + 1, 2):
-        key_pose(solve_pose(ex_name, contraction(f / frames)), f, last)
-    actions[ex_name] = action
+LEVELS = range(len(SHAPE_LEVELS)) if MORPH_D and os.environ.get("COLLISIONS", "1") == "1" else [0]
+for level in LEVELS:
+    set_shape(level)
+    if QBODY:
+        fit_row_seat()
+    for ex_name, ex in EXERCISES.items():
+        only = os.environ.get("COLLISIONS_ONLY")
+        if os.environ.get("COLLISIONS", "1") == "1" and (not only or ex_name in only.split(",")):
+            ADJUST[(ex_name, level)] = solve_adjust(ex_name)
+        clip = ex_name if level == 0 else f"{ex_name}@{level}"
+        action = bpy.data.actions.new(clip)
+        arm.animation_data.action = action
+        last = {}
+        for f in range(0, frames + 1, 2):
+            key_pose(solve_pose(ex_name, contraction(f / frames)), f, last)
+        actions[clip] = action
+set_shape(0)
+if QBODY:
+    fit_row_seat()
 slot = arm.animation_data.action_slot if hasattr(arm.animation_data, "action_slot") else None
 arm.animation_data.action = None
 for ex_name, action in actions.items():
@@ -2276,6 +2304,15 @@ def collision_report():
     t_ = _bvh(P0_, "torso")[0]
     hit_ = t_.find_nearest(REST["spine_02"].to_translation())
     print("torso normals point", "out" if (REST["spine_02"].to_translation() - hit_[0]).dot(hit_[1]) < 0 else "IN")
+    for level in LEVELS:
+        set_shape(level)
+        if QBODY:
+            fit_row_seat()
+        _report_level(level)
+    set_shape(0)
+
+
+def _report_level(level):
     total = 0.0
     only = os.environ.get("COLLISIONS_ONLY")
     for ex_name in EXERCISES:
@@ -2287,9 +2324,9 @@ def collision_report():
                 if d > worst.get(k, (0, 0))[0]:
                     worst[k] = (d, round(float(c), 1))
         total += sum(d for d, _ in worst.values())
-        print(f"collisions {ex_name}:", ", ".join(f"{a}->{b} {d * 100:.1f}cm@{c}" for (a, b), (d, c) in
+        print(f"collisions {ex_name}@{level}:", ", ".join(f"{a}->{b} {d * 100:.1f}cm@{c}" for (a, b), (d, c) in
                                                    sorted(worst.items(), key=lambda kv: -kv[1][0])) or "none")
-    print(f"collisions total depth {total * 100:.1f} cm")
+    print(f"collisions @{level} total depth {total * 100:.1f} cm")
 
 
 if os.environ.get("COLLISIONS", "1") == "1":

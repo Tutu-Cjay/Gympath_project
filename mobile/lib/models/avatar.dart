@@ -113,6 +113,27 @@ class Avatar {
 
   double bodyValue(String id) => body[id] ?? 0;
 
+  /// The body shapes the exercise animations are fitted to, so that no part
+  /// passes into another (tools/build_anatomy_model.py SHAPE_LEVELS): every
+  /// slider at 0, ½ and its full value; clips "Name", "Name@1", "Name@2".
+  static const int shapeLevels = 3;
+
+  /// The smallest fitted shape that holds this avatar: its largest slider
+  /// (as a share of that slider's full value), rounded up. Sliders below
+  /// zero only make the body slimmer.
+  int get shapeLevel {
+    var m = 0.0;
+    for (final s in bodySliders) {
+      final v = bodyValue(s.id);
+      if (v > 0) m = math.max(m, v / s.max);
+    }
+    return (m * (shapeLevels - 1) - 1e-9).ceil().clamp(0, shapeLevels - 1);
+  }
+
+  /// The animation clip of [animation] fitted to this avatar's body.
+  String clip(String animation) =>
+      shapeLevel == 0 ? animation : '$animation@$shapeLevel';
+
   Avatar withBody(String id, double value) {
     final s = bodySliders.firstWhere((b) => b.id == id);
     final next = Map<String, double>.of(body);
@@ -167,6 +188,7 @@ class Avatar {
         'hair': hair,
         'hairColor': linear(hairColors[hairColor].color),
         'body': {for (final b in bodySliders) b.id: bodyValue(b.id)},
+        'level': shapeLevel,
       };
 
   static bool _sameBody(Map<String, double> a, Map<String, double> b) =>

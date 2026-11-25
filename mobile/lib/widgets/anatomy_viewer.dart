@@ -170,7 +170,7 @@ class _AnatomyViewerState extends State<AnatomyViewer> {
       backgroundColor: AnatomyViewer.background,
       loading: Loading.eager,
       autoPlay: true,
-      animationName: e.animation,
+      animationName: _avatar.value.clip(e.animation),
       cameraControls: true,
       cameraOrbit: widget.initialOrbit ?? e.cameraOrbit,
       cameraTarget: widget.initialTarget ?? e.cameraTarget,
@@ -250,6 +250,14 @@ function start(mv) {
     return [0, 1, 2].map(function (i) { return a[i] + (b[i] - a[i]) * t; });
   }
   function restingRegion() { return skinOn ? avatar.skin : BARE; }
+  // Each exercise has a clip per fitted body shape (Avatar.shapeLevel).
+  function clip(name) {
+    const L = avatar.level || 0;
+    const fitted = L ? name + '@' + L : name;
+    const have = mv.availableAnimations || [];
+    // a model without the fitted clips plays the base one
+    return have.length && have.indexOf(fitted) < 0 ? name : fitted;
+  }
   // Body shape: the model's morph targets, set from the avatar's sliders
   // (model-viewer has no API for them, so through its three.js scene).
   function applyBody() {
@@ -377,13 +385,13 @@ function start(mv) {
     original = null;
     applyBody();
     if (heat) machine(false);
-    mv.animationName = cfg.animation;
+    mv.animationName = clip(cfg.animation);
     resume();
   }
   const api = {
     exercise: function (c) {
       cfg = c; focus = null; last = {};
-      mv.animationName = c.animation;
+      mv.animationName = clip(c.animation);
       mv.currentTime = 0;
       mv.cameraOrbit = c.orbit;
       mv.cameraTarget = c.target;
@@ -401,7 +409,17 @@ function start(mv) {
     focus: function (g) { focus = g; last = {}; },
     heat: function (h) { heat = h; last = {}; machine(!h); },
     skin: function (on) { skinOn = on; dressDirty = true; },
-    avatar: function (a) { avatar = a; dressDirty = true; applyBody(); },
+    avatar: function (a) {
+      const before = avatar.level || 0;
+      avatar = a; dressDirty = true; applyBody();
+      if ((a.level || 0) !== before) {
+        // the body changed enough for another fitted clip: same moment of it
+        const t = mv.currentTime;
+        mv.animationName = clip(cfg.animation);
+        mv.currentTime = t;
+        resume();
+      }
+    },
     live: function (on) { live = on; if (on) { shown = target; } resume(); },
     progress: function (p) { target = Math.min(1, Math.max(0, p)); }
   };

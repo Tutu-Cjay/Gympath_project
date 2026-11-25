@@ -65,4 +65,18 @@ void main() {
     expect(j.body.containsKey('Chest'), isFalse);
     expect(j.body.containsKey('Height'), isFalse);
   });
+
+  test('body shape picks the clip fitted to it, rounding up', () {
+    const a = Avatar();
+    expect(a.shapeLevel, 0);
+    expect(a.clip('LatPulldown'), 'LatPulldown');
+    expect(a.withBody('Muscle', -0.5).shapeLevel, 0); // slimmer: the base fits
+    expect(a.withBody('BodyFat', 0.2).shapeLevel, 1);
+    expect(a.withBody('BodyFat', 0.5).shapeLevel, 1);
+    expect(a.withBody('Chest', 0.51).shapeLevel, 2);
+    final big = a.withBody('Muscle', 1).withBody('Waist', 0.3);
+    expect(big.shapeLevel, 2);
+    expect(big.clip('LatPulldown'), 'LatPulldown@2');
+    expect(big.toJs()['level'], 2);
+  });
 }
