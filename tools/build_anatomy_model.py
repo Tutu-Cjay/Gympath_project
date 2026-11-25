@@ -2131,7 +2131,12 @@ def solve_props(ex_name, pose, c, hip_z):
         out["prop_cable_c"] = place(p1, p2)
         out["prop_cable_b"] = place(p2, top)
     if ex_name == "LatPulldown":
-        out["prop_seat_a"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
+        fit = LAT_SEAT.get("fit")
+        if fit:                               # fitted to the figure (fit_lat_seat)
+            pos, stretch = fit
+            out["prop_seat_a"] = place(pos) @ Matrix.Diagonal((1, 1, stretch, 1))
+        else:
+            out["prop_seat_a"] = place((0, pose["pelvis"].to_translation().y + 0.02, hip_z - 0.10))
     if ex_name == "SeatedCableRow":
         fit = ROW_SEAT.get("fit")
         if fit:                               # fitted to the figure (fit_row_seat)
@@ -2346,6 +2351,26 @@ def solve_adjust(ex_name):
 
 
 ROW_SEAT = {}
+LAT_SEAT = {}
+
+
+def fit_lat_seat():
+    """The pulldown seat under this figure: the pad just under the seat
+    bones; the thigh roller just on the thighs (the seat's frame stretches
+    up, so a fuller thigh still fits under it)."""
+    LAT_SEAT.pop("fit", None)
+    pose = solve_pose("LatPulldown", 0.0)
+    P = posed_verts(pose)
+    body = P[_body_v]
+    y0 = pose["pelvis"].to_translation().y + 0.02
+    under = (np.abs(body[:, 0]) < 0.20) & (np.abs(body[:, 1] - y0) < 0.18)
+    top = body[under, 2].min() + 0.006
+    thighs = (np.abs(body[:, 0]) < 0.26) & (np.abs(body[:, 1] - (y0 - 0.30)) < 0.05)
+    thigh_top = body[thighs, 2].max() - 0.006
+    # roller: centre 0.24 m over the pad top, radius 0.05 (both stretched)
+    stretch = max(1.0, (thigh_top - top) / 0.19)
+    LAT_SEAT["fit"] = ((0.0, y0, top), stretch)
+    print(f"pulldown seat (shape {SHAPE_LEVELS[CUR_LEVEL]}): pad top {top:.3f} m, frame x{stretch:.2f}")
 
 
 def fit_row_seat():
@@ -2453,6 +2478,7 @@ for level in LEVELS:
     set_shape(level)
     if QBODY:
         fit_row_seat()
+        fit_lat_seat()
     for ex_name, ex in EXERCISES.items():
         only = os.environ.get("COLLISIONS_ONLY")
         if os.environ.get("COLLISIONS", "1") == "1" and (not only or ex_name in only.split(",")):
@@ -2471,6 +2497,7 @@ for level in LEVELS:
 set_shape(0)
 if QBODY:
     fit_row_seat()
+    fit_lat_seat()
 slot = arm.animation_data.action_slot if hasattr(arm.animation_data, "action_slot") else None
 arm.animation_data.action = None
 for ex_name, action in actions.items():
@@ -2492,6 +2519,7 @@ def collision_report():
         set_shape(level)
         if QBODY:
             fit_row_seat()
+            fit_lat_seat()
         _report_level(level)
     set_shape(0)
 
