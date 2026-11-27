@@ -80,4 +80,7 @@ Proprietary, except `mobile/assets/models/anatomy_male.glb` and
 Universal Base Characters (CC0); the muscle outlines on them derive from
 BodyParts3D, © The Database Center for Life Science, licensed under
 CC Attribution-Share Alike 2.1 Japan (rebuild with
-`tools/build_anatomy_model.py`).
+`tools/build_anatomy_model.py`). The cable machines, attachments and the
+tracker in them are Gympath's own, made from code
+(`tools/build_cable_machines.py`) and put into the figures with
+`tools/fit_machines_to_figure.py`.

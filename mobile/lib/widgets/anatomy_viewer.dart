@@ -432,7 +432,7 @@ function start(mv) {
         }
         continue;
       }
-      if (FIXED.indexOf(n) >= 0) continue;
+      if (FIXED.indexOf(n) >= 0 || n.indexOf('machine_') === 0) continue;
       const cloth = n.slice(-6) === '_cloth';
       const g = cloth ? n.slice(0, -6) : n;
       let k = 0, tone = PRIMARY;
@@ -455,7 +455,9 @@ function start(mv) {
   function machine(on) {
     if (!mv.model) return;
     const parts = mv.model.materials.filter(function (m) {
-      return ['equipment', 'cable', 'tracker', 'pad'].indexOf(m.name) >= 0;
+      // The stand-in props and the detailed machines (tools/fit_machines_to_figure.py).
+      return ['equipment', 'cable', 'tracker', 'pad'].indexOf(m.name) >= 0 ||
+          m.name.indexOf('machine_') === 0;
     });
     if (!original) {
       original = {};
